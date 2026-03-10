@@ -1,0 +1,91 @@
+# ==================================
+# Python cache
+# ==================================
+__pycache__/
+*.py[cod]
+*.pyd
+*$py.class
+
+# ==================================
+# Python environments
+# ==================================
+.env
+.venv/
+venv/
+env/
+conda-env/
+
+# ==================================
+# Jupyter
+# ==================================
+.ipynb_checkpoints/
+
+# ==================================
+# Dataset (large files)
+# ==================================
+data/
+datasets/
+dataset/
+KITTI/
+nuScenes/
+Waymo/
+
+# ==================================
+# Model weights / checkpoints
+# ==================================
+*.pth
+*.pt
+*.ckpt
+*.onnx
+
+# project specific model folders
+Models/
+DataAugmentationModel/
+
+# ==================================
+# Logs / experiment outputs
+# ==================================
+logs/
+runs/
+tensorboard/
+wandb/
+*.log
+
+# results folders
+RESULTS*/
+results*/
+
+# ==================================
+# Build / compiled files
+# ==================================
+build/
+dist/
+*.egg-info
+*.whl
+
+# ==================================
+# CUDA / C++ compiled artifacts
+# ==================================
+*.so
+*.o
+*.a
+*.out
+
+# ==================================
+# Third-party libraries
+# ==================================
+spconv/
+OpenPCDet/
+third_party/
+
+# ==================================
+# IDE / editor
+# ==================================
+.vscode/
+.idea/
+
+# ==================================
+# OS generated files
+# ==================================
+.DS_Store
+Thumbs.db
