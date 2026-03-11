@@ -155,6 +155,8 @@ def train_one_epoch(model, train_loader, criterion, optimizer,
 
     for i_iter, data in enumerate(train_loader):
         # ========== Extract data ==========
+        # Use actual batch size (last batch may be smaller)
+        actual_bs = data[10].shape[0]
         train_vox_tenl = [torch.from_numpy(i).to(device) for i in data[1]]
         train_pt_fea_tenl = [torch.from_numpy(i).type(torch.FloatTensor).to(device) for i in data[2]]
         train_pt_fea_tenr = [torch.from_numpy(i).type(torch.FloatTensor).to(device) for i in data[5]]
@@ -162,7 +164,7 @@ def train_one_epoch(model, train_loader, criterion, optimizer,
         monoleft = torch.from_numpy(data[6]).float()
         monoright = torch.from_numpy(data[7]).float()
         monorear = torch.from_numpy(data[8]).float()
-        radarimage = torch.from_numpy(data[9]).float().reshape(batch_size, 1, 512, 512)
+        radarimage = torch.from_numpy(data[9]).float().reshape(actual_bs, 1, 512, 512)
         labels = torch.from_numpy(data[10]).float()
         transgt = labels[:, 3:6]
         rotgt = labels[:, 0:3]
@@ -185,13 +187,13 @@ def train_one_epoch(model, train_loader, criterion, optimizer,
 
         # 1. LiDAR Left
         loss1, trans1, rot1 = safe_forward(
-            "LiDAR_L", lambda: model([train_pt_fea_tenl, train_vox_tenl, batch_size]))
+            "LiDAR_L", lambda: model([train_pt_fea_tenl, train_vox_tenl, actual_bs]))
         if loss1 is not None:
             losses.append(loss1)
 
         # 2. LiDAR Right
         loss2, trans2, rot2 = safe_forward(
-            "LiDAR_R", lambda: model([train_pt_fea_tenr, train_vox_tenr, batch_size]))
+            "LiDAR_R", lambda: model([train_pt_fea_tenr, train_vox_tenr, actual_bs]))
         if loss2 is not None:
             losses.append(loss2)
 
@@ -264,9 +266,6 @@ def train_one_epoch(model, train_loader, criterion, optimizer,
             print(f"  ERROR: NaN total loss at batch {i_iter+1}!")
             continue
 
-        lidar_loss = loss1.item() + loss2.item()
-        cam_loss = loss3.item() + loss4.item() + loss5.item()
-        radar_loss = loss6.item()
         print(f"  Batch {i_iter+1}/{len(train_loader)} | "
               f"Loss: {loss_val:.4f} "
               f"[LiDAR: {lidar_loss:.3f} | Cam: {cam_loss:.3f} | "
@@ -285,6 +284,8 @@ def validate(model, val_loader, criterion, device, batch_size):
 
     with torch.no_grad():
         for i_iter_val, data in enumerate(val_loader):
+            # Use actual batch size (last batch may be smaller)
+            actual_bs = data[10].shape[0]
             val_vox_tenl = [torch.from_numpy(i).to(device) for i in data[1]]
             val_pt_fea_tenl = [torch.from_numpy(i).type(torch.FloatTensor).to(device) for i in data[2]]
             val_pt_fea_tenr = [torch.from_numpy(i).type(torch.FloatTensor).to(device) for i in data[5]]
@@ -292,29 +293,44 @@ def validate(model, val_loader, criterion, device, batch_size):
             monoleft = torch.from_numpy(data[6]).float()
             monoright = torch.from_numpy(data[7]).float()
             monorear = torch.from_numpy(data[8]).float()
-            radarimage = torch.from_numpy(data[9]).float().reshape(batch_size, 1, 512, 512)
+            radarimage = torch.from_numpy(data[9]).float().reshape(actual_bs, 1, 512, 512)
             labels = torch.from_numpy(data[10]).float()
             transgt = labels[:, 3:6]
             rotgt = labels[:, 0:3]
 
-            # Forward all modalities
-            trans1, rot1 = model([val_pt_fea_tenl, val_vox_tenl, batch_size])
-            trans2, rot2 = model([val_pt_fea_tenr, val_vox_tenr, batch_size])
-            loss1 = criterion(trans1, rot1, rotgt.to(device), transgt.to(device))
-            loss2 = criterion(trans2, rot2, rotgt.to(device), transgt.to(device))
+            # Forward all modalities (skip NaN)
+            val_loss_parts = []
+
+            try:
+                trans1, rot1 = model([val_pt_fea_tenl, val_vox_tenl, actual_bs])
+                l = criterion(trans1, rot1, rotgt.to(device), transgt.to(device))
+                if not (torch.isnan(l) or torch.isinf(l)):
+                    val_loss_parts.append(l)
+            except Exception:
+                pass
+
+            try:
+                trans2, rot2 = model([val_pt_fea_tenr, val_vox_tenr, actual_bs])
+                l = criterion(trans2, rot2, rotgt.to(device), transgt.to(device))
+                if not (torch.isnan(l) or torch.isinf(l)):
+                    val_loss_parts.append(l)
+            except Exception:
+                pass
 
             trans3, rot3 = model([monoleft.to(device)])
             trans4, rot4 = model([monoright.to(device)])
             trans5, rot5 = model([monorear.to(device)])
-            loss3 = criterion(trans3, rot3, rotgt.to(device), transgt.to(device))
-            loss4 = criterion(trans4, rot4, rotgt.to(device), transgt.to(device))
-            loss5 = criterion(trans5, rot5, rotgt.to(device), transgt.to(device))
+            val_loss_parts.append(criterion(trans3, rot3, rotgt.to(device), transgt.to(device)))
+            val_loss_parts.append(criterion(trans4, rot4, rotgt.to(device), transgt.to(device)))
+            val_loss_parts.append(criterion(trans5, rot5, rotgt.to(device), transgt.to(device)))
 
             trans6, rot6 = model([radarimage.to(device)])
-            loss6 = criterion(trans6, rot6, rotgt.to(device), transgt.to(device))
+            val_loss_parts.append(criterion(trans6, rot6, rotgt.to(device), transgt.to(device)))
 
-            val_loss_total = loss1 + loss2 + loss3 + loss4 + loss5 + loss6
-            val_losses.append(val_loss_total.item())
+            if val_loss_parts:
+                val_loss_total = sum(val_loss_parts)
+                if not torch.isnan(val_loss_total):
+                    val_losses.append(val_loss_total.item())
 
     return np.mean(val_losses)
 

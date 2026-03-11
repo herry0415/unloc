@@ -1,0 +1,33 @@
+DATA:
+  data_name: Hercules #todo 数据集类名
+  data_root: /data/drj/HeRCULES/  #todo Fill in the data path
+  fea_dim: 3
+  max_volume_space: [ 120, 120, 120 ] #todo 这是？
+  min_volume_space: [ -120, -120, -120 ] #todo？
+  # todo 体素大小0.3
+  spatial_shape: [ 800, 800, 800] #todo？
+
+TRAIN:
+  # arch
+  arch: SGLoc
+  input_c: 3
+  output_c: 3
+  scale_list: [2, 4, 8]
+  layers: [64, 128, 128, 256, 256, 512, 512, 512, 4096, 4096]
+  att_dim: 128
+  frozen: False
+  # training
+  gpu_id: 0
+  workers: 12  # data loader workers
+  batch_size: 20 # batch size for training
+  batch_size_val: 30  # batch size for validation during training, memory and speed tradeoff
+  base_lr: 0.002 #todo 与sgloc/ lisa一致
+  decay_step: 1200 #todo 与sgloc / lisa 一致
+  epochs: 100
+  start_epoch: 0
+  pcc_loss_weight: 1200 #Todo 600
+  momentum: 0.9
+  manual_seed: 20 # ['Library', 'Mountain', 'Sports']
+  save_path: /data/drj/HeRCULES_weights/RALoc_Sports_Lidar/ #todo 改序列 改lidar/radar类型
+  resume: /data/drj/HeRCULES_weights/RALoc_Sports_Lidar/checkpoint_epoch99.tar #todo 测试加载权重 /data/drj/HeRCULES_weights/RALoc_Library_Lidar
+  threshold: 1.2

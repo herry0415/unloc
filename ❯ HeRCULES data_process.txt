@@ -1,0 +1,112 @@
+❯ # HeRCULES data_process                                                                                                                                 
+                                                                                                                                                          
+## 数据集组织形式                                                                                                                                         
+                                                                                                                                                          
+`/home/data/ldq/HeRCULES/`                                                                                                                                
+                                                                                                                                                          
+```python                                                                                                                                                 
+/home/ldq/data/HeRCULES/                                                                                                                                  
+├── Library/                                                                                                                                              
+│   ├── Library_01_Day/                                                                                                                                   
+│   │   ├── Calibration/                                                                                                                                  
+│   │   ├── LiDAR/                                                                                                                                        
+│   │   │   ├── Aeva/                                                                                                                                     
+│   │   │   ├── np8Aeva/                                                                                                                                  
+│   │   │   └── fps4096_pts/                                                                                                                              
+│   │   ├── PR_GT/                                                                                                                                        
+│   │   │   └── Continental_gt.txt                                                                                                                        
+│   │   ├── Radar/                                                                                                                                        
+│   │   │   ├── continental/                                                                                                                              
+│   │   │   └── multi_frame_w7/                                                                                                                           
+│   │   ├─── sensor_data                                                                                                                                  
+│   │   └── (其他忽略/不重要)                                                                                                                             
+│   ├── Library_02_Night/                                                                                                                                 
+│   └── Library_03_Day/                                                                                                                                   
+├── Mountain/                                                                                                                                             
+├── Parking/                                                                                                                                              
+├── Sports/                                                                                                                                               
+├── River_Island/                                                                                                                                         
+├── Sports/                                                                                                                                               
+├── Stream/                                                                                                                                               
+└── Street/                                                                                                                                               
+```                                                                                                                                                       
+```                                                                                                                                                       
+                                                                                                                                                          
+![image.png](attachment:89b79716-f18c-493f-8612-f97d7183e835:image.png)                                                                                   
+                                                                                                                                                          
+![image.png](attachment:a50f43e1-5798-43e2-bc9f-b849e0c6f057:image.png)                                                                                   
+                                                                                                                                                          
+![image.png](attachment:670aca3c-04ab-47f9-8845-43b3cf449b24:image.png)                                                                                   
+                                                                                                                                                          
+### `LiDAR/fps4096_pts`                                                                                                                                   
+                                                                                                                                                          
+处理完的lidar路径 `/home/ldq/data/HeRCULES/Library/Library_02_Night/LiDAR/fps4096_pts`                                                                    
+                                                                                                                                                          
+![image.png](attachment:8578e48c-4fd3-4d94-a7e4-abba2d6542b2:image.png)                                                                                   
+                                                                                                                                                          
+- `Nx8维` 特征信息 经过fps到4096个点的处理结果                                                                                                            
+- `8维`特征信息 `x, y, z, reflectivity,  velocity, time-offset, line-index, intensity`                                                                    
+                                                                                                                                                          
+    X、Y、Z、反射率、速度、 t_off 、 line_id   、 强度                                                                                                    
+                                                                                                                                                          
+                                                                                                                                                          
+### `/Radar/multi_frame_w7`                                                                                                                               
+                                                                                                                                                          
+处理完的radar路径 `/home/ldq/data/HeRCULES/Library/Library_02_Night/Radar/multi_frame_w7`                                                                 
+                                                                                                                                                          
+- `Nx8维` 多帧合并后的点云 `w=7`  以**`.bin形式`**存在   原始点云文件  `没有进行上采样到4096个点和归一化处理`                                             
+- 8维特征信息`x, y, z, v, range, RCS ,azimuth, elevation`                                                                                                 
+- **各个维度特征解释**                                                                                                                                    
+    - [0-2] xyz坐标信息 x, y, z                                                                                                                           
+    - [3] v 多普勒速度                                                                                                                                    
+    - [4] r range距离                                                                                                                                     
+    - [5] RCS 雷达散射截面积（Radar Cross Section） 描述目标反射雷达信号能力的物理量                                                                      
+                                                                                                                                                          
+        ![image.png](attachment:88db0cb9-38b2-4af6-b5f0-99afdbf2e893:image.png)                                                                           
+                                                                                                                                                          
+    - [6] az 方位角（Azimuth） 从雷达正前方（x 轴）向左右的水平夹角                                                                                       
+    - [7] el 俯仰角（Elevation） 从水平面向上/下的垂直夹角                                                                                                
+                                                                                                                                                          
+### radar_org：                                                                                                                                           
+                                                                                                                                                          
+- Nx8维 原始rada`r单帧点云`，以npy的形式存在                                                                                                              
+- 各个特征信息如下 `x, y, z, v, r, RCS ,az, el`                                                                                                           
+                                                                                                                                                          
+### radar_ego：                                                                                                                                           
+                                                                                                                                                          
+- `Nx8维` 剔除掉动态点的`单帧radar点云`，以npy的形式存在                                                                                                  
+- 特征信息同上                                                                                                                                            
+- 该数据集的一些传感器设置如下                                                                                                                            
+                                                                                                                                                          
+![image.png](attachment:48cb7f42-40ce-4ff9-a948-201c53c58871:image.png)                                                                                   
+                                                                                                                                                          
+### Continental_gt.txt                                                                                                                                    
+                                                                                                                                                          
+- TXT format with [time, x, y, z, qx, qy, qz, qw]                                                                                                         
+- 时间戳 xyz坐标 以及qx, qy, qz, qw                                                                                                                       
+                                                                                                                                                          
+### /Radar/radar_pose.txt                                                                                                                                 
+                                                                                                                                                          
+- 是**去除掉前三帧**一一对应的radar文件的时间戳位姿                                                                                                       
+- 内容： 时间戳 经纬度 高度 协方差矩阵？                                                                                                                  
+                                                                                                                                                          
+### /LiDAR/lidar_pose.txt                                                                                                                                 
+                                                                                                                                                          
+- 是根据**点云文件找到的对应的lidar文件的时间戳**位姿                                                                                                     
+- 内容同上                                                                                                                                                
+                                                                                                                                                          
+### /sensor_data/Global_Radar_Pose.csv                                                                                                                    
+                                                                                                                                                          
+- **全部radar**文件对应**的位姿  只保存了 timestamp,northing,easting**                                                                                    
+                                                                                                                                                          
+### /sensor_data/Global_Ladar_Pose.csv                                                                                                                    
+                                                                                                                                                          
+- **全部lidar**文件对应**的位姿 只保存了 timestamp,northing,easting** 我现在需要用原本的代码兼容另一个数据集hercules 它里面有lidar radar image            
+但是只有一个lidar一个radar 和两个左右相机 
+他的基本处理的代码 和数据集类和路径 我已经放到./hercules 数据集里面了 包括一些lidar和radar的处理方式 路径等等
+请你先读取这些代码
+
+
+然后帮我写一份让整个训练测试代码兼容hercules数据集的方式 路径 参数 格式我给你了 你看你还需要哪些
+然后审核完写一份让我hercules 数据集在这个模型上训练和测试 整个修改计划 以及还需要什么信息 以及我传感器不足怎么处理 但是还是要兼容多模态 注意一些参数的问题
+请你仔细审视你的语言

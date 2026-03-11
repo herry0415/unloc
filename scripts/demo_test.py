@@ -304,13 +304,32 @@ def test_gradient_flow(model, batch, device, batch_size):
     print("\n--- Test 8: Gradient Flow ---")
     model.train()
 
+    # Prepare data for all three branches
+    vox_tenl = [torch.from_numpy(i).to(device) for i in batch[1]]
+    pt_fea_tenl = [torch.from_numpy(i).type(torch.FloatTensor).to(device) for i in batch[2]]
     monoleft = torch.from_numpy(batch[6]).float().to(device)
+    radarimage = torch.from_numpy(batch[9]).float().reshape(batch_size, 1, 512, 512).to(device)
     labels = torch.from_numpy(batch[10]).float()
     transgt = labels[:, 3:6].to(device)
     rotgt = labels[:, 0:3].to(device)
 
-    trans, rot = model([monoleft])
-    loss = nn.MSELoss()(trans, transgt) + nn.MSELoss()(rot, rotgt)
+    criterion = nn.MSELoss()
+    loss = torch.tensor(0.0, device=device)
+
+    # LiDAR branch
+    trans1, rot1 = model([pt_fea_tenl, vox_tenl, batch_size])
+    l = criterion(trans1, transgt) + criterion(rot1, rotgt)
+    if not (torch.isnan(l) or torch.isinf(l)):
+        loss = loss + l
+
+    # Camera branch
+    trans2, rot2 = model([monoleft])
+    loss = loss + criterion(trans2, transgt) + criterion(rot2, rotgt)
+
+    # Radar branch
+    trans3, rot3 = model([radarimage])
+    loss = loss + criterion(trans3, transgt) + criterion(rot3, rotgt)
+
     loss.backward()
 
     # Check that gradients exist and are not zero
