@@ -1,0 +1,588 @@
+
+❯ ❯ HeRCULES data_process.txt /home/drj/project/Fusion Localization Project/DEMO_PLAN.md  我现在需要用原本的代码兼容另一个数据集hercules 它里面有lidar radar image           
+                                                                                                                                                                             
+但是只有一个lidar一个radar 和两个左右相机                                                                                                                                    
+他的基本处理的代码 和数据集类和路径 我已经放到./hercules 数据集里面了 包括一些lidar和radar的处理方式 路径等等                                                                
+请你先读取这些代码                                                                                                                                                           
+                                                                                                                                                                             
+                                                                                                                                                                             
+然后帮我写一份让整个训练测试代码兼容hercules数据集的方式 路径 参数 格式我给你了 你看你还需要哪些                                                                             
+然后审核完写一份让我hercules 数据集在这个模型上训练和测试 整个修改计划 以及还需要什么信息 以及我传感器不足怎么处理 但是还是要兼容多模态 注意一些参数的问题                   
+请你仔细审视你的语言                                                                                                                                                         
+ 你可以看看前两个数据组织 以及demo的训练测试逻辑 我之 前让你的opus模型写过一份基本plan你可以参考一下                                                                          
+╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮                               
+     │ HeRCULES Dataset Integration Plan                                                                                                          │                          
+     │                                                                                                                                            │                          
+     │ Context                                                                                                                                    │                          
+     │                                                                                                                                            │                          
+     │ The current Fusion Localization pipeline is built for RobotCar (6 sensors: 2 LiDAR + 3 Camera + 1 Radar-2D). HeRCULES has 3 sensors: 1     │                          
+     │ LiDAR (Aeva), 1 Camera (stereo_left), 1 Radar (Continental 3D point cloud). The goal is to make the training/testing pipeline work with    │                          
+     │ HeRCULES while maintaining multi-modal fusion capability.                                                                                  │                          
+     │                                                                                                                                            │                          
+     │ Key differences:                                                                                                                           │                          
+     │ - Sensor count: 6 → 3 (only 1 of each modality)                                                                                            │                          
+     │ - Radar is a 3D point cloud (Nx8), not a 2D image                                                                                          │                          
+     │ - LiDAR is Aeva (8-channel .bin), xyz in first 3 columns                                                                                   │                          
+     │ - Camera is 1440x1080 PNG (stereo_left only)                                                                                               │                          
+     │ - Pose: [timestamp, x, y, z, qx, qy, qz, qw] quaternion format                                                                             │                          
+     │ - Data locations: /data/drj/HeRCULES/{Library,Sports}/{*_01_Day,*_02_Night,*_03_Day}/                                                      │                          
+     │ - Train/Val split: 01_Day + 02_Night = train, 03_Day = val                                                                                 │                          
+     │                                                                                                                                            │                          
+     │ Design Decisions                                                                                                                           │                          
+     │                                                                                                                                            │                          
+     │ 1. Radar as 3D Point Cloud → LiDAR Branch (Cylinder3D)                                                                                     │                          
+     │                                                                                                                                            │                          
+     │ Since HeRCULES radar is a 3D point cloud, process it through the same Cylinder3D sparse convolution pipeline as LiDAR. Both LiDAR and radar│                          
+     │  produce [pt_features, voxel_coords, batch_size] 3-tuples, routed to Fusionmodel's LiDAR branch (len(input)==3).                           │                          
+     │                                                                                                                                            │                          
+     │ 2. 11-Tuple Format Preserved, 3 Forward Passes                                                                                             │                          
+     │                                                                                                                                            │                          
+     │ Keep the 11-tuple data format for compatibility. Missing sensors (right LiDAR, right camera, rear camera, 2D radar) are filled with zeros  │                          
+     │ but never passed through the model. Training runs 3 forward passes instead of 6:                                                           │                          
+     │ - Pass 1: LiDAR → model([pt_fea_lidar, vox_lidar, bs]) → loss1                                                                             │                          
+     │ - Pass 2: Radar (as point cloud) → model([pt_fea_radar, vox_radar, bs]) → loss2                                                            │                          
+     │ - Pass 3: Camera → model([stereo_left]) → loss3                                                                                            │                          
+     │                                                                                                                                            │                          
+     │ 3. Pose Conversion                                                                                                                         │                          
+     │                                                                                                                                            │                          
+     │ Use poses_to_matrices() from RALoc (util/pose_util.py) to convert quaternion → 4x4 matrix, then flatten to (N,12), then use                │                          
+     │ tools/utils.py's process_poses() to convert to 6DoF [trans(3), log_quat(3)]. This ensures consistent pose normalization with RobotCar      │                          
+     │ pipeline.                                                                                                                                  │                          
+     │                                                                                                                                            │                          
+     │ 4. No FusionModel Changes (Initial Version)                                                                                                │                          
+     │                                                                                                                                            │                          
+     │ Both LiDAR and radar point clouds share lidarmodaity bias. The Cylinder3D backbone handles both point cloud types. Separate bias terms can │                          
+     │ be added later if experiments warrant it.                                                                                                  │                          
+     │                                                                                                                                            │                          
+     │ 5. Voxelization: fixed_volume_space=False                                                                                                  │                          
+     │                                                                                                                                            │                          
+     │ Radar has wider spatial extent (~120m) than LiDAR (~50m). Using data-adaptive bounds (fixed_volume_space=False) in pointclouddata() lets   │                          
+     │ each point cloud auto-scale to [480, 360, 32] grid.                                                                                        │                          
+     │                                                                                                                                            │                          
+     │ ---                                                                                                                                        │                          
+     │ Files to Create (5 files)                                                                                                                  │                          
+     │                                                                                                                                            │                          
+     │ File 1: data/hercules_fusion.py — Unified HeRCULES Dataset                                                                                 │                          
+     │                                                                                                                                            │                          
+     │ Purpose: Load all 3 modalities (LiDAR, Camera, Radar) and output the same 7-tuple as RobotCar.__getitem__().                               │                          
+     │                                                                                                                                            │                          
+     │ Reuses:                                                                                                                                    │                          
+     │ - poses_to_matrices() from /home/drj/project/RALoc/util/pose_util.py (inline copy, lines 16-50)                                            │                          
+     │ - process_poses(), qlog() from tools/utils.py (lines 116-159)                                                                              │                          
+     │ - Radar→LiDAR calibration matrix from hercules/hercules_radar.py (lines 85-98)                                                             │                          
+     │ - KDTree timestamp matching pattern from hercules/hercules_radar.py (lines 140-186)                                                        │                          
+     │                                                                                                                                            │                          
+     │ Class HerculesFusion(data.Dataset):                                                                                                        │                          
+     │                                                                                                                                            │                          
+     │ __init__(self, data_root, sequence_name, split, img_size=512):                                                                             │                          
+     │ 1. Map sequence_name + split to sequences (Library: 01_Day+02_Night train, 03_Day val; Sports: Complex_*)                                  │                          
+     │ 2. Load PR_GT/Aeva_gt.txt per sequence → poses_to_matrices() → flatten to (N,12)                                                           │                          
+     │ 3. Build file lists for all 3 modalities:                                                                                                  │                          
+     │   - LiDAR: LiDAR/np8Aeva/{timestamp}.bin                                                                                                   │                          
+     │   - Camera: stereo_left/{timestamp}.png                                                                                                    │                          
+     │   - Radar: Radar/multi_frame_w7/{timestamp}_multi_w7.bin                                                                                   │                          
+     │ 4. KDTree match camera & radar timestamps to LiDAR timestamps (LiDAR is reference)                                                         │                          
+     │ 5. Compute pose stats (mean_t, std_t) on train set, save/load {seq_name}_fusion_pose_stats.txt                                             │                          
+     │ 6. Convert all poses via process_poses() → (N, 6) [trans(3), log_quat(3)]                                                                  │                          
+     │ 7. Store Radar→LiDAR calibration matrix for coordinate transform                                                                           │                          
+     │ 8. Compute LiDAR/Radar normalization stats (mean/std per xyz) on train set                                                                 │                          
+     │                                                                                                                                            │                          
+     │ __getitem__(self, index):                                                                                                                  │                          
+     │ 1. Load LiDAR: np.fromfile(...).reshape(-1,8)[:,:3] → normalize → (N_l, 3)                                                                 │                          
+     │ 2. Load Radar: np.fromfile(...).reshape(-1,8)[:,:3] → apply Radar→LiDAR calib → normalize → (N_r, 3)                                       │                          
+     │ 3. Load Camera: PIL.open() → Resize(512) → CenterCrop(512) → ToTensor → Normalize → (3, 512, 512)                                          │                          
+     │ 4. Get pose: self.poses[index] → (6,) float32                                                                                              │                          
+     │ 5. Return 7-tuple: (camera, zeros(3,512,512), zeros(3,512,512), zeros(1,512,512), lidar_xyz, radar_xyz, pose)                              │                          
+     │                                                                                                                                            │                          
+     │ This 7-tuple maps to the cylinder_dataset.__getitem__() expectation:                                                                       │                          
+     │ monoleft, monoright, monorear, radarimage, leftlidar, rightlidar, pose                                                                     │                          
+     │ Where monoright, monorear are zero placeholders, radarimage (2D) is zero, and rightlidar is actually the radar 3D point cloud.             │                          
+     │                                                                                                                                            │                          
+     │ ---                                                                                                                                        │                          
+     │ File 2: dataloader/hercules_dataset.py — Cylinder Dataset Wrapper                                                                          │                          
+     │                                                                                                                                            │                          
+     │ Purpose: Wrap HerculesFusion with cylindrical voxelization, reuse collate_fn_BEV.                                                          │                          
+     │                                                                                                                                            │                          
+     │ Reuses:                                                                                                                                    │                          
+     │ - cart2polar(), polar2cat() from dataloader/dataset_semantickitti.py (lines 13-20)                                                         │                          
+     │ - pointclouddata() logic from dataset_semantickitti.py (lines 191-223)                                                                     │                          
+     │ - collate_fn_BEV from dataset_semantickitti.py (lines 236-256) — import directly                                                           │                          
+     │                                                                                                                                            │                          
+     │ Class hercules_cylinder_dataset(data.Dataset):                                                                                             │                          
+     │                                                                                                                                            │                          
+     │ __init__(self, point_cloud_dataset, grid_size, fixed_volume_space=False, max_volume_space=None, min_volume_space=None):                    │                          
+     │ - Store point_cloud_dataset (HerculesFusion instance)                                                                                      │                          
+     │ - Store grid_size [480, 360, 32] and volume space params                                                                                   │                          
+     │                                                                                                                                            │                          
+     │ __getitem__(self, index):                                                                                                                  │                          
+     │ 1. Get 7-tuple from self.point_cloud_dataset[index]                                                                                        │                          
+     │ 2. Unpack: monoleft, monoright, monorear, radarimage_2d, lidar_xyz, radar_xyz, pose                                                        │                          
+     │ 3. Voxelize LiDAR: self.pointclouddata(lidar_xyz) → (voxel_pos_l, grid_ind_l, fea_l)                                                       │                          
+     │ 4. Voxelize Radar: self.pointclouddata(radar_xyz) → (voxel_pos_r, grid_ind_r, fea_r)                                                       │                          
+     │ 5. Assemble 11-tuple (same as cylinder_dataset):                                                                                           │                          
+     │ (voxel_pos_l, grid_ind_l, fea_l, voxel_pos_r, grid_ind_r, fea_r,                                                                           │                          
+     │  monoleft, monoright, monorear, radarimage_2d, pose)                                                                                       │                          
+     │                                                                                                                                            │                          
+     │ pointclouddata(self, xyz): Copy from dataset_semantickitti.py lines 191-223. With fixed_volume_space=False, uses percentile-based bounds   │                          
+     │ per point cloud.                                                                                                                           │                          
+     │                                                                                                                                            │                          
+     │ Collate function: Import and reuse collate_fn_BEV from dataset_semantickitti.py.                                                           │                          
+     │                                                                                                                                            │                          
+     │ ---                                                                                                                                        │                          
+     │ File 3: config/hercules_fusion.yaml — Config                                                                                               │                          
+     │                                                                                                                                            │                          
+     │ format_version: 4                                                                                                                          │                          
+     │ model_params:                                                                                                                              │                          
+     │   model_architecture: "cylinder_asym"                                                                                                      │                          
+     │   output_shape: [480, 360, 32]                                                                                                             │                          
+     │   fea_dim: 8                                                                                                                               │                          
+     │   out_fea_dim: 256                                                                                                                         │                          
+     │   num_class: 3                                                                                                                             │                          
+     │   num_input_features: 16                                                                                                                   │                          
+     │   use_norm: True                                                                                                                           │                          
+     │   init_size: 32                                                                                                                            │                          
+     │                                                                                                                                            │                          
+     │ dataset_params:                                                                                                                            │                          
+     │   dataset_type: "cylinder_dataset"                                                                                                         │                          
+     │   pc_dataset_type: "SemKITTI_sk"                                                                                                           │                          
+     │   ignore_label: 0                                                                                                                          │                          
+     │   return_test: False                                                                                                                       │                          
+     │   fixed_volume_space: False                                                                                                                │                          
+     │   label_mapping: ""                                                                                                                        │                          
+     │   max_volume_space: [50, 3.1415926, 2]                                                                                                     │                          
+     │   min_volume_space: [0, -3.1415926, -4]                                                                                                    │                          
+     │                                                                                                                                            │                          
+     │ train_data_loader:                                                                                                                         │                          
+     │   data_path: "/data/drj/HeRCULES/"                                                                                                         │                          
+     │   imageset: "train"                                                                                                                        │                          
+     │   return_ref: True                                                                                                                         │                          
+     │   batch_size: 2                                                                                                                            │                          
+     │   shuffle: True                                                                                                                            │                          
+     │   num_workers: 4                                                                                                                           │                          
+     │                                                                                                                                            │                          
+     │ val_data_loader:                                                                                                                           │                          
+     │   data_path: "/data/drj/HeRCULES/"                                                                                                         │                          
+     │   imageset: "val"                                                                                                                          │                          
+     │   return_ref: True                                                                                                                         │                          
+     │   batch_size: 2                                                                                                                            │                          
+     │   shuffle: False                                                                                                                           │                          
+     │   num_workers: 4                                                                                                                           │                          
+     │                                                                                                                                            │                          
+     │ train_params:                                                                                                                              │                          
+     │   model_load_path: "none"                                                                                                                  │                          
+     │   model_save_path: "checkpoints/hercules_best.pt"                                                                                          │                          
+     │   checkpoint_every_n_steps: 1000                                                                                                           │                          
+     │   max_num_epochs: 100                                                                                                                      │                          
+     │   eval_every_n_steps: 1000                                                                                                                 │                          
+     │   learning_rate: 0.0001                                                                                                                    │                          
+     │                                                                                                                                            │                          
+     │ Note: dataset_params keeps the existing schema so Combinedmodel.py's argparse can parse it. HeRCULES-specific params (data_root,           │                          
+     │ sequence_name) are handled as command-line args in the training script.                                                                    │                          
+     │                                                                                                                                            │                          
+     │ ---                                                                                                                                        │                          
+     │ File 4: scripts/hercules_train.py — Training Script                                                                                        │                          
+     │                                                                                                                                            │                          
+     │ Purpose: Train FusionModel on HeRCULES with 3 forward passes per batch.                                                                    │                          
+     │                                                                                                                                            │                          
+     │ Structure (follows demo_train.py and TrainModel.py patterns):                                                                              │                          
+     │                                                                                                                                            │                          
+     │ # 1. Setup paths, set sys.argv for Combinedmodel.py argparse                                                                               │                          
+     │ PROJECT_ROOT = ...                                                                                                                         │                          
+     │ sys.argv = [sys.argv[0], '-y', CONFIG_PATH]                                                                                                │                          
+     │                                                                                                                                            │                          
+     │ # 2. Parse HeRCULES-specific args                                                                                                          │                          
+     │ parser.add_argument('--data_root', default='/data/drj/HeRCULES/')                                                                          │                          
+     │ parser.add_argument('--sequence', default='Library', choices=['Library', 'Sports'])                                                        │                          
+     │ parser.add_argument('--batch_size', type=int, default=2)                                                                                   │                          
+     │ parser.add_argument('--epochs', type=int, default=100)                                                                                     │                          
+     │ parser.add_argument('--lr', type=float, default=0.0001)                                                                                    │                          
+     │                                                                                                                                            │                          
+     │ # 3. Build datasets directly (bypass data_builder.build())                                                                                 │                          
+     │ train_dataset = HerculesFusion(data_root, sequence, split='train')                                                                         │                          
+     │ train_cyl = hercules_cylinder_dataset(train_dataset, grid_size=[480,360,32])                                                               │                          
+     │ train_loader = DataLoader(train_cyl, batch_size=bs, collate_fn=collate_fn_BEV, shuffle=True)                                               │                          
+     │ # Same for val                                                                                                                             │                          
+     │                                                                                                                                            │                          
+     │ # 4. Build model                                                                                                                           │                          
+     │ model = Fusionmodel().to(device)                                                                                                           │                          
+     │                                                                                                                                            │                          
+     │ # 5. Loss + optimizer (AtLocCriterion with learnable uncertainty)                                                                          │                          
+     │ training_loss = AtLocCriterion(sax=0.0, saq=0.0, learn_beta=True)                                                                          │                          
+     │ optimizer = Adam([model.parameters(), [training_loss.sax, training_loss.saq]], lr=lr)                                                      │                          
+     │                                                                                                                                            │                          
+     │ # 6. Training loop — 3 forward passes per batch                                                                                            │                          
+     │ for epoch in range(epochs):                                                                                                                │                          
+     │     for data in train_loader:                                                                                                              │                          
+     │         # Extract data (11-tuple)                                                                                                          │                          
+     │         actual_bs = data[10].shape[0]                                                                                                      │                          
+     │         pt_fea_lidar = [torch.from_numpy(i).float().to(device) for i in data[2]]                                                           │                          
+     │         vox_lidar = [torch.from_numpy(i).to(device) for i in data[1]]                                                                      │                          
+     │         pt_fea_radar = [torch.from_numpy(i).float().to(device) for i in data[5]]                                                           │                          
+     │         vox_radar = [torch.from_numpy(i).to(device) for i in data[4]]                                                                      │                          
+     │         camera = torch.from_numpy(data[6]).float().to(device)                                                                              │                          
+     │         labels = torch.from_numpy(data[10]).float()                                                                                        │                          
+     │         transgt = labels[:, 0:3].to(device)  # following TrainModel.py convention                                                          │                          
+     │         rotgt = labels[:, 3:6].to(device)                                                                                                  │                          
+     │                                                                                                                                            │                          
+     │         optimizer.zero_grad()                                                                                                              │                          
+     │                                                                                                                                            │                          
+     │         # Forward 1: LiDAR                                                                                                                 │                          
+     │         trans1, rot1 = model([pt_fea_lidar, vox_lidar, actual_bs])                                                                         │                          
+     │         loss1 = training_loss(trans1, rot1, rotgt, transgt)                                                                                │                          
+     │                                                                                                                                            │                          
+     │         # Forward 2: Radar (as point cloud, same interface)                                                                                │                          
+     │         trans2, rot2 = model([pt_fea_radar, vox_radar, actual_bs])                                                                         │                          
+     │         loss2 = training_loss(trans2, rot2, rotgt, transgt)                                                                                │                          
+     │                                                                                                                                            │                          
+     │         # Forward 3: Camera                                                                                                                │                          
+     │         trans3, rot3 = model([camera])                                                                                                     │                          
+     │         loss3 = training_loss(trans3, rot3, rotgt, transgt)                                                                                │                          
+     │                                                                                                                                            │                          
+     │         # Backward                                                                                                                         │                          
+     │         loss = loss1 + loss2 + loss3                                                                                                       │                          
+     │         loss.backward()                                                                                                                    │                          
+     │         clip_grad_norm_(model.parameters(), max_norm=1.0)                                                                                  │                          
+     │         optimizer.step()                                                                                                                   │                          
+     │                                                                                                                                            │                          
+     │     # Validation + checkpoint saving (same pattern as demo_train.py)                                                                       │                          
+     │                                                                                                                                            │                          
+     │ ---                                                                                                                                        │                          
+     │ File 5: scripts/hercules_test.py — Test/Inference Script                                                                                   │                          
+     │                                                                                                                                            │                          
+     │ Purpose: Validate model on HeRCULES data (mirrors demo_test.py structure).                                                                 │                          
+     │                                                                                                                                            │                          
+     │ Tests:                                                                                                                                     │                          
+     │ 1. Data loading (HerculesFusion + hercules_cylinder_dataset)                                                                               │                          
+     │ 2. Model creation                                                                                                                          │                          
+     │ 3. Checkpoint loading                                                                                                                      │                          
+     │ 4. LiDAR inference                                                                                                                         │                          
+     │ 5. Radar (point cloud) inference                                                                                                           │                          
+     │ 6. Camera inference                                                                                                                        │                          
+     │ 7. Full pipeline (all 3 modalities)                                                                                                        │                          
+     │ 8. Gradient flow                                                                                                                           │                          
+     │                                                                                                                                            │                          
+     │ ---                                                                                                                                        │                          
+     │ Files NOT Modified                                                                                                                         │                          
+     │                                                                                                                                            │                          
+     │ - FusionModel.py — No changes. Both LiDAR and radar use len(input)==3 path.                                                                │                          
+     │ - Combinedmodel.py — No changes. Reads config from sys.argv as before.                                                                     │                          
+     │ - builder/data_builder.py — No changes. Training script builds datasets directly.                                                          │                          
+     │ - dataloader/dataset_semantickitti.py — No changes. We import collate_fn_BEV and replicate pointclouddata().                               │                          
+     │ - TrainModel.py — No changes. Original RobotCar training script stays intact.                                                              │                          
+     │                                                                                                                                            │                          
+     │ ---                                                                                                                                        │                          
+     │ Implementation Order                                                                                                                       │                          
+     │                                                                                                                                            │                          
+     │ 1. data/hercules_fusion.py — Core dataset class (most complex, handles all 3 modalities + pose + timestamp alignment)                      │                          
+     │ 2. dataloader/hercules_dataset.py — Cylinder voxelization wrapper (straightforward, reuses existing logic)                                 │                          
+     │ 3. config/hercules_fusion.yaml — Config file                                                                                               │                          
+     │ 4. scripts/hercules_train.py — Training script                                                                                             │                          
+     │ 5. scripts/hercules_test.py — Test script                                                                                                  │                          
+     │                                                                                                                                            │                          
+     │ ---                                                                                                                                        │                          
+     │ Verification                                                                                                                               │                          
+     │                                                                                                                                            │                          
+     │ 1. Unit test HerculesFusion: Run python data/hercules_fusion.py standalone to verify data loading, timestamp alignment counts, pose        │                          
+     │ conversion, and output shapes                                                                                                              │                          
+     │ 2. Unit test hercules_cylinder_dataset: Verify voxelization produces valid grid indices within [0,480)x[0,360)x[0,32), feature dim = 8     │                          
+     │ 3. Run hercules_train.py for 1 epoch on Library: Check that loss is finite, all 3 modality gradients flow, no NaN/Inf                      │                          
+     │ 4. Run hercules_test.py: All 8 tests should pass                                                                                           │                          
+     │ 5. Check memory: With batch_size=2, 3 forward passes should fit comfortably in GPU                                                         │                          
+     │                                                                                                                                            │                          
+     │ Known Risks                                                                                                                                │                          
+     │                                                                                                                                            │                          
+     │ - Radar point cloud sparsity: Continental radar produces fewer points than Aeva LiDAR. Cylinder3D handles variable-size inputs natively via│                          
+     │  sparse operations.                                                                                                                        │                          
+     │ - Cylinder3D indice_key: Both LiDAR and radar go through the same Lidarmodel instance. Sequential forward calls should work fine (spconv   │                          
+     │ resets per call).                                                                                                                          │                          
+     │ - util/pose_util dependency: The existing hercules/*.py imports from util.pose_util (RALoc project). We copy the needed functions          │                          
+     │ (poses_to_matrices) inline to avoid external dependency.                                                                                   │                          
+     │                                                                                                                                                                       
+╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮                               
+     │ HeRCULES Dataset Integration Plan                                                                                                          │                          
+     │                                                                                                                                            │                          
+     │ Context                                                                                                                                    │                          
+     │                                                                                                                                            │                          
+     │ The current Fusion Localization pipeline is built for RobotCar (6 sensors: 2 LiDAR + 3 Camera + 1 Radar-2D). HeRCULES has 3 sensors: 1     │                          
+     │ LiDAR (Aeva), 1 Camera (stereo_left), 1 Radar (Continental 3D point cloud). The goal is to make the training/testing pipeline work with    │                          
+     │ HeRCULES while maintaining multi-modal fusion capability.                                                                                  │                          
+     │                                                                                                                                            │                          
+     │ Key differences:                                                                                                                           │                          
+     │ - Sensor count: 6 → 3 (only 1 of each modality)                                                                                            │                          
+     │ - Radar is a 3D point cloud (Nx8), not a 2D image                                                                                          │                          
+     │ - LiDAR is Aeva (8-channel .bin), xyz in first 3 columns                                                                                   │                          
+     │ - Camera is 1440x1080 PNG (stereo_left only)                                                                                               │                          
+     │ - Pose: [timestamp, x, y, z, qx, qy, qz, qw] quaternion format                                                                             │                          
+     │ - Data locations: /data/drj/HeRCULES/{Library,Sports}/{*_01_Day,*_02_Night,*_03_Day}/                                                      │                          
+     │ - Train/Val split: 01_Day + 02_Night = train, 03_Day = val                                                                                 │                          
+     │                                                                                                                                            │                          
+     │ Design Decisions                                                                                                                           │                          
+     │                                                                                                                                            │                          
+     │ 1. Radar as 3D Point Cloud → LiDAR Branch (Cylinder3D)                                                                                     │                          
+     │                                                                                                                                            │                          
+     │ Since HeRCULES radar is a 3D point cloud, process it through the same Cylinder3D sparse convolution pipeline as LiDAR. Both LiDAR and radar│                          
+     │  produce [pt_features, voxel_coords, batch_size] 3-tuples, routed to Fusionmodel's LiDAR branch (len(input)==3).                           │                          
+     │                                                                                                                                            │                          
+     │ 2. 11-Tuple Format Preserved, 3 Forward Passes                                                                                             │                          
+     │                                                                                                                                            │                          
+     │ Keep the 11-tuple data format for compatibility. Missing sensors (right LiDAR, right camera, rear camera, 2D radar) are filled with zeros  │                          
+     │ but never passed through the model. Training runs 3 forward passes instead of 6:                                                           │                          
+     │ - Pass 1: LiDAR → model([pt_fea_lidar, vox_lidar, bs]) → loss1                                                                             │                          
+     │ - Pass 2: Radar (as point cloud) → model([pt_fea_radar, vox_radar, bs]) → loss2                                                            │                          
+     │ - Pass 3: Camera → model([stereo_left]) → loss3                                                                                            │                          
+     │                                                                                                                                            │                          
+     │ 3. Pose Conversion                                                                                                                         │                          
+     │                                                                                                                                            │                          
+     │ Use poses_to_matrices() from RALoc (util/pose_util.py) to convert quaternion → 4x4 matrix, then flatten to (N,12), then use                │                          
+     │ tools/utils.py's process_poses() to convert to 6DoF [trans(3), log_quat(3)]. This ensures consistent pose normalization with RobotCar      │                          
+     │ pipeline.                                                                                                                                  │                          
+     │                                                                                                                                            │                          
+     │ 4. No FusionModel Changes (Initial Version)                                                                                                │                          
+     │                                                                                                                                            │                          
+     │ Both LiDAR and radar point clouds share lidarmodaity bias. The Cylinder3D backbone handles both point cloud types. Separate bias terms can │                          
+     │ be added later if experiments warrant it.                                                                                                  │                          
+     │                                                                                                                                            │                          
+     │ 5. Voxelization: fixed_volume_space=False                                                                                                  │                          
+     │                                                                                                                                            │                          
+     │ Radar has wider spatial extent (~120m) than LiDAR (~50m). Using data-adaptive bounds (fixed_volume_space=False) in pointclouddata() lets   │                          
+     │ each point cloud auto-scale to [480, 360, 32] grid.                                                                                        │                          
+     │                                                                                                                                            │                          
+     │ ---                                                                                                                                        │                          
+     │ Files to Create (5 files)                                                                                                                  │                          
+     │                                                                                                                                            │                          
+     │ File 1: data/hercules_fusion.py — Unified HeRCULES Dataset                                                                                 │                          
+     │                                                                                                                                            │                          
+     │ Purpose: Load all 3 modalities (LiDAR, Camera, Radar) and output the same 7-tuple as RobotCar.__getitem__().                               │                          
+     │                                                                                                                                            │                          
+     │ Reuses:                                                                                                                                    │                          
+     │ - poses_to_matrices() from /home/drj/project/RALoc/util/pose_util.py (inline copy, lines 16-50)                                            │                          
+     │ - process_poses(), qlog() from tools/utils.py (lines 116-159)                                                                              │                          
+     │ - Radar→LiDAR calibration matrix from hercules/hercules_radar.py (lines 85-98)                                                             │                          
+     │ - KDTree timestamp matching pattern from hercules/hercules_radar.py (lines 140-186)                                                        │                          
+     │                                                                                                                                            │                          
+     │ Class HerculesFusion(data.Dataset):                                                                                                        │                          
+     │                                                                                                                                            │                          
+     │ __init__(self, data_root, sequence_name, split, img_size=512):                                                                             │                          
+     │ 1. Map sequence_name + split to sequences (Library: 01_Day+02_Night train, 03_Day val; Sports: Complex_*)                                  │                          
+     │ 2. Load PR_GT/Aeva_gt.txt per sequence → poses_to_matrices() → flatten to (N,12)                                                           │                          
+     │ 3. Build file lists for all 3 modalities:                                                                                                  │                          
+     │   - LiDAR: LiDAR/np8Aeva/{timestamp}.bin                                                                                                   │                          
+     │   - Camera: stereo_left/{timestamp}.png                                                                                                    │                          
+     │   - Radar: Radar/multi_frame_w7/{timestamp}_multi_w7.bin                                                                                   │                          
+     │ 4. KDTree match camera & radar timestamps to LiDAR timestamps (LiDAR is reference)                                                         │                          
+     │ 5. Compute pose stats (mean_t, std_t) on train set, save/load {seq_name}_fusion_pose_stats.txt                                             │                          
+     │ 6. Convert all poses via process_poses() → (N, 6) [trans(3), log_quat(3)]                                                                  │                          
+     │ 7. Store Radar→LiDAR calibration matrix for coordinate transform                                                                           │                          
+     │ 8. Compute LiDAR/Radar normalization stats (mean/std per xyz) on train set                                                                 │                          
+     │                                                                                                                                            │                          
+     │ __getitem__(self, index):                                                                                                                  │                          
+     │ 1. Load LiDAR: np.fromfile(...).reshape(-1,8)[:,:3] → normalize → (N_l, 3)                                                                 │                          
+     │ 2. Load Radar: np.fromfile(...).reshape(-1,8)[:,:3] → apply Radar→LiDAR calib → normalize → (N_r, 3)                                       │                          
+     │ 3. Load Camera: PIL.open() → Resize(512) → CenterCrop(512) → ToTensor → Normalize → (3, 512, 512)                                          │                          
+     │ 4. Get pose: self.poses[index] → (6,) float32                                                                                              │                          
+     │ 5. Return 7-tuple: (camera, zeros(3,512,512), zeros(3,512,512), zeros(1,512,512), lidar_xyz, radar_xyz, pose)                              │                          
+     │                                                                                                                                            │                          
+     │ This 7-tuple maps to the cylinder_dataset.__getitem__() expectation:                                                                       │                          
+     │ monoleft, monoright, monorear, radarimage, leftlidar, rightlidar, pose                                                                     │                          
+     │ Where monoright, monorear are zero placeholders, radarimage (2D) is zero, and rightlidar is actually the radar 3D point cloud.             │                          
+     │                                                                                                                                            │                          
+     │ ---                                                                                                                                        │                          
+     │ File 2: dataloader/hercules_dataset.py — Cylinder Dataset Wrapper                                                                          │                          
+     │                                                                                                                                            │                          
+     │ Purpose: Wrap HerculesFusion with cylindrical voxelization, reuse collate_fn_BEV.                                                          │                          
+     │                                                                                                                                            │                          
+     │ Reuses:                                                                                                                                    │                          
+     │ - cart2polar(), polar2cat() from dataloader/dataset_semantickitti.py (lines 13-20)                                                         │                          
+     │ - pointclouddata() logic from dataset_semantickitti.py (lines 191-223)                                                                     │                          
+     │ - collate_fn_BEV from dataset_semantickitti.py (lines 236-256) — import directly                                                           │                          
+     │                                                                                                                                            │                          
+     │ Class hercules_cylinder_dataset(data.Dataset):                                                                                             │                          
+     │                                                                                                                                            │                          
+     │ __init__(self, point_cloud_dataset, grid_size, fixed_volume_space=False, max_volume_space=None, min_volume_space=None):                    │                          
+     │ - Store point_cloud_dataset (HerculesFusion instance)                                                                                      │                          
+     │ - Store grid_size [480, 360, 32] and volume space params                                                                                   │                          
+     │                                                                                                                                            │                          
+     │ __getitem__(self, index):                                                                                                                  │                          
+     │ 1. Get 7-tuple from self.point_cloud_dataset[index]                                                                                        │                          
+     │ 2. Unpack: monoleft, monoright, monorear, radarimage_2d, lidar_xyz, radar_xyz, pose                                                        │                          
+     │ 3. Voxelize LiDAR: self.pointclouddata(lidar_xyz) → (voxel_pos_l, grid_ind_l, fea_l)                                                       │                          
+     │ 4. Voxelize Radar: self.pointclouddata(radar_xyz) → (voxel_pos_r, grid_ind_r, fea_r)                                                       │                          
+     │ 5. Assemble 11-tuple (same as cylinder_dataset):                                                                                           │                          
+     │ (voxel_pos_l, grid_ind_l, fea_l, voxel_pos_r, grid_ind_r, fea_r,                                                                           │                          
+     │  monoleft, monoright, monorear, radarimage_2d, pose)                                                                                       │                          
+     │                                                                                                                                            │                          
+     │ pointclouddata(self, xyz): Copy from dataset_semantickitti.py lines 191-223. With fixed_volume_space=False, uses percentile-based bounds   │                          
+     │ per point cloud.                                                                                                                           │                          
+     │                                                                                                                                            │                          
+     │ Collate function: Import and reuse collate_fn_BEV from dataset_semantickitti.py.                                                           │                          
+     │                                                                                                                                            │                          
+     │ ---                                                                                                                                        │                          
+     │ File 3: config/hercules_fusion.yaml — Config                                                                                               │                          
+     │                                                                                                                                            │                          
+     │ format_version: 4                                                                                                                          │                          
+     │ model_params:                                                                                                                              │                          
+     │   model_architecture: "cylinder_asym"                                                                                                      │                          
+     │   output_shape: [480, 360, 32]                                                                                                             │                          
+     │   fea_dim: 8                                                                                                                               │                          
+     │   out_fea_dim: 256                                                                                                                         │                          
+     │   num_class: 3                                                                                                                             │                          
+     │   num_input_features: 16                                                                                                                   │                          
+     │   use_norm: True                                                                                                                           │                          
+     │   init_size: 32                                                                                                                            │                          
+     │                                                                                                                                            │                          
+     │ dataset_params:                                                                                                                            │                          
+     │   dataset_type: "cylinder_dataset"                                                                                                         │                          
+     │   pc_dataset_type: "SemKITTI_sk"                                                                                                           │                          
+     │   ignore_label: 0                                                                                                                          │                          
+     │   return_test: False                                                                                                                       │                          
+     │   fixed_volume_space: False                                                                                                                │                          
+     │   label_mapping: ""                                                                                                                        │                          
+     │   max_volume_space: [50, 3.1415926, 2]                                                                                                     │                          
+     │   min_volume_space: [0, -3.1415926, -4]                                                                                                    │                          
+     │                                                                                                                                            │                          
+     │ train_data_loader:                                                                                                                         │                          
+     │   data_path: "/data/drj/HeRCULES/"                                                                                                         │                          
+     │   imageset: "train"                                                                                                                        │                          
+     │   return_ref: True                                                                                                                         │                          
+     │   batch_size: 2                                                                                                                            │                          
+     │   shuffle: True                                                                                                                            │                          
+     │   num_workers: 4                                                                                                                           │                          
+     │                                                                                                                                            │                          
+     │ val_data_loader:                                                                                                                           │                          
+     │   data_path: "/data/drj/HeRCULES/"                                                                                                         │                          
+     │   imageset: "val"                                                                                                                          │                          
+     │   return_ref: True                                                                                                                         │                          
+     │   batch_size: 2                                                                                                                            │                          
+     │   shuffle: False                                                                                                                           │                          
+     │   num_workers: 4                                                                                                                           │                          
+     │                                                                                                                                            │                          
+     │ train_params:                                                                                                                              │                          
+     │   model_load_path: "none"                                                                                                                  │                          
+     │   model_save_path: "checkpoints/hercules_best.pt"                                                                                          │                          
+     │   checkpoint_every_n_steps: 1000                                                                                                           │                          
+     │   max_num_epochs: 100                                                                                                                      │                          
+     │   eval_every_n_steps: 1000                                                                                                                 │                          
+     │   learning_rate: 0.0001                                                                                                                    │                          
+     │                                                                                                                                            │                          
+     │ Note: dataset_params keeps the existing schema so Combinedmodel.py's argparse can parse it. HeRCULES-specific params (data_root,           │                          
+     │ sequence_name) are handled as command-line args in the training script.                                                                    │                          
+     │                                                                                                                                            │                          
+     │ ---                                                                                                                                        │                          
+     │ File 4: scripts/hercules_train.py — Training Script                                                                                        │                          
+     │                                                                                                                                            │                          
+     │ Purpose: Train FusionModel on HeRCULES with 3 forward passes per batch.                                                                    │                          
+     │                                                                                                                                            │                          
+     │ Structure (follows demo_train.py and TrainModel.py patterns):                                                                              │                          
+     │                                                                                                                                            │                          
+     │ # 1. Setup paths, set sys.argv for Combinedmodel.py argparse                                                                               │                          
+     │ PROJECT_ROOT = ...                                                                                                                         │                          
+     │ sys.argv = [sys.argv[0], '-y', CONFIG_PATH]                                                                                                │                          
+     │                                                                                                                                            │                          
+     │ # 2. Parse HeRCULES-specific args                                                                                                          │                          
+     │ parser.add_argument('--data_root', default='/data/drj/HeRCULES/')                                                                          │                          
+     │ parser.add_argument('--sequence', default='Library', choices=['Library', 'Sports'])                                                        │                          
+     │ parser.add_argument('--batch_size', type=int, default=2)                                                                                   │                          
+     │ parser.add_argument('--epochs', type=int, default=100)                                                                                     │                          
+     │ parser.add_argument('--lr', type=float, default=0.0001)                                                                                    │                          
+     │                                                                                                                                            │                          
+     │ # 3. Build datasets directly (bypass data_builder.build())                                                                                 │                          
+     │ train_dataset = HerculesFusion(data_root, sequence, split='train')                                                                         │                          
+     │ train_cyl = hercules_cylinder_dataset(train_dataset, grid_size=[480,360,32])                                                               │                          
+     │ train_loader = DataLoader(train_cyl, batch_size=bs, collate_fn=collate_fn_BEV, shuffle=True)                                               │                          
+     │ # Same for val                                                                                                                             │                          
+     │                                                                                                                                            │                          
+     │ # 4. Build model                                                                                                                           │                          
+     │ model = Fusionmodel().to(device)                                                                                                           │                          
+     │                                                                                                                                            │                          
+     │ # 5. Loss + optimizer (AtLocCriterion with learnable uncertainty)                                                                          │                          
+     │ training_loss = AtLocCriterion(sax=0.0, saq=0.0, learn_beta=True)                                                                          │                          
+     │ optimizer = Adam([model.parameters(), [training_loss.sax, training_loss.saq]], lr=lr)                                                      │                          
+     │                                                                                                                                            │                          
+     │ # 6. Training loop — 3 forward passes per batch                                                                                            │                          
+     │ for epoch in range(epochs):                                                                                                                │                          
+     │     for data in train_loader:                                                                                                              │                          
+     │         # Extract data (11-tuple)                                                                                                          │                          
+     │         actual_bs = data[10].shape[0]                                                                                                      │                          
+     │         pt_fea_lidar = [torch.from_numpy(i).float().to(device) for i in data[2]]                                                           │                          
+     │         vox_lidar = [torch.from_numpy(i).to(device) for i in data[1]]                                                                      │                          
+     │         pt_fea_radar = [torch.from_numpy(i).float().to(device) for i in data[5]]                                                           │                          
+     │         vox_radar = [torch.from_numpy(i).to(device) for i in data[4]]                                                                      │                          
+     │         camera = torch.from_numpy(data[6]).float().to(device)                                                                              │                          
+     │         labels = torch.from_numpy(data[10]).float()                                                                                        │                          
+     │         transgt = labels[:, 0:3].to(device)  # following TrainModel.py convention                                                          │                          
+     │         rotgt = labels[:, 3:6].to(device)                                                                                                  │                          
+     │                                                                                                                                            │                          
+     │         optimizer.zero_grad()                                                                                                              │                          
+     │                                                                                                                                            │                          
+     │         # Forward 1: LiDAR                                                                                                                 │                          
+     │         trans1, rot1 = model([pt_fea_lidar, vox_lidar, actual_bs])                                                                         │                          
+     │         loss1 = training_loss(trans1, rot1, rotgt, transgt)                                                                                │                          
+     │                                                                                                                                            │                          
+     │         # Forward 2: Radar (as point cloud, same interface)                                                                                │                          
+     │         trans2, rot2 = model([pt_fea_radar, vox_radar, actual_bs])                                                                         │                          
+     │         loss2 = training_loss(trans2, rot2, rotgt, transgt)                                                                                │                          
+     │                                                                                                                                            │                          
+     │         # Forward 3: Camera                                                                                                                │                          
+     │         trans3, rot3 = model([camera])                                                                                                     │                          
+     │         loss3 = training_loss(trans3, rot3, rotgt, transgt)                                                                                │                          
+     │                                                                                                                                            │                          
+     │         # Backward                                                                                                                         │                          
+     │         loss = loss1 + loss2 + loss3                                                                                                       │                          
+     │         loss.backward()                                                                                                                    │                          
+     │         clip_grad_norm_(model.parameters(), max_norm=1.0)                                                                                  │                          
+     │         optimizer.step()                                                                                                                   │                          
+     │                                                                                                                                            │                          
+     │     # Validation + checkpoint saving (same pattern as demo_train.py)                                                                       │                          
+     │                                                                                                                                            │                          
+     │ ---                                                                                                                                        │                          
+     │ File 5: scripts/hercules_test.py — Test/Inference Script                                                                                   │                          
+     │                                                                                                                                            │                          
+     │ Purpose: Validate model on HeRCULES data (mirrors demo_test.py structure).                                                                 │                          
+     │                                                                                                                                            │                          
+     │ Tests:                                                                                                                                     │                          
+     │ 1. Data loading (HerculesFusion + hercules_cylinder_dataset)                                                                               │                          
+     │ 2. Model creation                                                                                                                          │                          
+     │ 3. Checkpoint loading                                                                                                                      │                          
+     │ 4. LiDAR inference                                                                                                                         │                          
+     │ 5. Radar (point cloud) inference                                                                                                           │                          
+     │ 6. Camera inference                                                                                                                        │                          
+     │ 7. Full pipeline (all 3 modalities)                                                                                                        │                          
+     │ 8. Gradient flow                                                                                                                           │                          
+     │                                                                                                                                            │                          
+     │ ---                                                                                                                                        │                          
+     │ Files NOT Modified                                                                                                                         │                          
+     │                                                                                                                                            │                          
+     │ - FusionModel.py — No changes. Both LiDAR and radar use len(input)==3 path.                                                                │                          
+     │ - Combinedmodel.py — No changes. Reads config from sys.argv as before.                                                                     │                          
+     │ - builder/data_builder.py — No changes. Training script builds datasets directly.                                                          │                          
+     │ - dataloader/dataset_semantickitti.py — No changes. We import collate_fn_BEV and replicate pointclouddata().                               │                          
+     │ - TrainModel.py — No changes. Original RobotCar training script stays intact.                                                              │                          
+     │                                                                                                                                            │                          
+     │ ---                                                                                                                                        │                          
+     │ Implementation Order                                                                                                                       │                          
+     │                                                                                                                                            │                          
+     │ 1. data/hercules_fusion.py — Core dataset class (most complex, handles all 3 modalities + pose + timestamp alignment)                      │                          
+     │ 2. dataloader/hercules_dataset.py — Cylinder voxelization wrapper (straightforward, reuses existing logic)                                 │                          
+     │ 3. config/hercules_fusion.yaml — Config file                                                                                               │                          
+     │ 4. scripts/hercules_train.py — Training script                                                                                             │                          
+     │ 5. scripts/hercules_test.py — Test script                                                                                                  │                          
+     │                                                                                                                                            │                          
+     │ ---                                                                                                                                        │                          
+     │ Verification                                                                                                                               │                          
+     │                                                                                                                                            │                          
+     │ 1. Unit test HerculesFusion: Run python data/hercules_fusion.py standalone to verify data loading, timestamp alignment counts, pose        │                          
+     │ conversion, and output shapes                                                                                                              │                          
+     │ 2. Unit test hercules_cylinder_dataset: Verify voxelization produces valid grid indices within [0,480)x[0,360)x[0,32), feature dim = 8     │                          
+     │ 3. Run hercules_train.py for 1 epoch on Library: Check that loss is finite, all 3 modality gradients flow, no NaN/Inf                      │                          
+     │ 4. Run hercules_test.py: All 8 tests should pass                                                                                           │                          
+     │ 5. Check memory: With batch_size=2, 3 forward passes should fit comfortably in GPU                                                         │                          
+     │                                                                                                                                            │                          
+     │ Known Risks                                                                                                                                │                          
+     │                                                                                                                                            │                          
+     │ - Radar point cloud sparsity: Continental radar produces fewer points than Aeva LiDAR. Cylinder3D handles variable-size inputs natively via│                          
+     │  sparse operations.                                                                                                                        │                          
+     │ - Cylinder3D indice_key: Both LiDAR and radar go through the same Lidarmodel instance. Sequential forward calls should work fine (spconv   │                          
+     │ resets per call).                                                                                                                          │                          
+     │ - util/pose_util dependency: The existing hercules/*.py imports from util.pose_util (RALoc project). We copy the needed functions          │                          
+     │ (poses_to_matrices) inline to avoid external dependency.                                                                                   │                          
+     │                                                            大概是这样然后你先看看 有问题问我 没问题 按照那个plan基础上进行修改代码 注意版本保存 神经网络部分 尽量不变

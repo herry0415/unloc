@@ -1,0 +1,77 @@
+# HeRCULES Dataset Config - Multi-modal fusion with LiDAR, Radar, and Camera
+# 3 sensors: 1x LiDAR (Aeva), 1x Radar (Continental 3D), 2x Cameras (stereo)
+# Training strategy: 3 forward passes (LiDAR + Radar + Camera) with loss sum
+
+format_version: 4
+
+###################
+## Model options
+model_params:
+  model_architecture: "cylinder_asym"
+
+  output_shape:
+    - 480      # rho grid size
+    - 360      # phi grid size
+    - 32       # z grid size
+
+  fea_dim: 8           # Input feature dimension (from voxelization)
+  out_fea_dim: 256     # Output feature dimension
+  num_class: 3         # 6DoF: 3 rotation + 3 translation
+  num_input_features: 16
+  use_norm: True
+  init_size: 32
+
+
+###################
+## Dataset options
+dataset_params:
+  dataset_type: "cylinder_dataset"
+  pc_dataset_type: "SemKITTI_sk"
+  ignore_label: 0
+  return_test: False
+
+  # Use data-adaptive bounds for Radar (wider range ~120m vs LiDAR ~50m)
+  fixed_volume_space: False
+
+  # These bounds are ignored when fixed_volume_space=False, but kept for schema
+  max_volume_space:
+    - 50            # rho_max (meters)
+    - 3.1415926     # pi (full circle)
+    - 2             # z_max (meters)
+
+  min_volume_space:
+    - 0             # rho_min (meters)
+    - -3.1415926    # -pi (full circle)
+    - -4            # z_min (meters)
+
+  label_mapping: ""
+
+
+###################
+## Data loader options
+train_data_loader:
+  data_path: "/data/drj/HeRCULES/"
+  imageset: "train"
+  return_ref: True
+  batch_size: 2
+  shuffle: True
+  num_workers: 4
+
+val_data_loader:
+  data_path: "/data/drj/HeRCULES/"
+  imageset: "val"
+  return_ref: True
+  batch_size: 2
+  shuffle: False
+  num_workers: 4
+
+
+###################
+## Train params
+train_params:
+  model_load_path: "none"
+  model_save_path: "checkpoints/hercules_best.pt"
+  checkpoint_every_n_steps: 100
+  max_num_epochs: 100
+  eval_every_n_steps: 100
+  learning_rate: 0.0001
