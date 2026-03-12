@@ -1,0 +1,208 @@
+原始 RobotCar 代码 vs 新增 Hercules 兼容代码：完整差异总结
+
+  ---
+  一、文件对应关系
+
+  ┌────────────┬───────────────────────────┬─────────────────────────────────┐
+  │    功能    │      原始 (RobotCar)      │         新增 (Hercules)         │
+  ├────────────┼───────────────────────────┼─────────────────────────────────┤
+  │ 数据加载   │ data/dataloaders.py       │ data/hercules_fusion.py         │
+  ├────────────┼───────────────────────────┼─────────────────────────────────┤
+  │ 数据集包装 │ dataloader/pc_dataset.py  │ dataloader/hercules_dataset.py  │
+  ├────────────┼───────────────────────────┼─────────────────────────────────┤
+  │ 训练脚本   │ TrainModel.py             │ scripts/hercules_train.py       │
+  ├────────────┼───────────────────────────┼─────────────────────────────────┤
+  │ 测试脚本   │ 无                        │ scripts/hercules_test.py (新增) │
+  ├────────────┼───────────────────────────┼─────────────────────────────────┤
+  │ 配置文件   │ config/semantickitti.yaml │ config/hercules_fusion.yaml     │
+  ├────────────┼───────────────────────────┼─────────────────────────────────┤
+  │ 数据构建   │ builder/data_builder.py   │ 直接在训练脚本中构建            │
+  ├────────────┼───────────────────────────┼─────────────────────────────────┤
+  │ 模型       │ FusionModel.py            │ 共用同一个 FusionModel.py       │
+  └────────────┴───────────────────────────┴─────────────────────────────────┘
+
+  ---
+  二、传感器配置差异
+
+  ┌──────────────┬─────────────────────────────────────────┬───────────────────────────────┐
+  │              │                RobotCar                 │           HeRCULES            │
+  ├──────────────┼─────────────────────────────────────────┼───────────────────────────────┤
+  │ LiDAR 数量   │ 2 个 (velodyne_left, velodyne_right)    │ 1 个 (np8Aeva, 8 通道)        │
+  ├──────────────┼─────────────────────────────────────────┼───────────────────────────────┤
+  │ 相机数量     │ 3 个 (mono_left, mono_right, mono_rear) │ 1 个 (stereo_left)            │
+  ├──────────────┼─────────────────────────────────────────┼───────────────────────────────┤
+  │ Radar 类型   │ 2D 极坐标图像 (.png)                    │ 3D 点云 (.bin, 8 通道)        │
+  ├──────────────┼─────────────────────────────────────────┼───────────────────────────────┤
+  │ 传感器总数   │ 6 个                                    │ 3 个                          │
+  ├──────────────┼─────────────────────────────────────────┼───────────────────────────────┤
+  │ Forward Pass │ 6 次 (每个传感器一次)                   │ 3 次 (LiDAR / Radar / Camera) │
+  ├──────────────┼─────────────────────────────────────────┼───────────────────────────────┤
+  │ Loss 组成    │ 6 个 loss 求和                          │ 3 个 loss 求和                │
+  └──────────────┴─────────────────────────────────────────┴───────────────────────────────┘
+
+  ---
+  三、数据格式差异
+
+  3.1 点云格式
+
+  RobotCar LiDAR:  .bin → float32 × 4 per point → reshape(-1, 4) → 取前 3 列 (x,y,z)
+                   Z 轴朝下，需要翻转：z = -z
+
+  HeRCULES LiDAR:  .bin → float32 × 8 per point → reshape(-1, 8) → 取前 3 列 (x,y,z)
+                   标准 XYZ 坐标（Z 朝上），无需翻转
+
+  3.2 Radar 处理
+
+  RobotCar:  极坐标 .png 图像 → radar_polar_to_cartesian() → 512×512 笛卡尔网格图
+             → 作为单通道图像 (1, 512, 512) 送入 ResNet
+
+  HeRCULES:  3D 点云 .bin → reshape(-1, 8) → 取 xyz
+             → 用标定矩阵 T_rl 变换到 LiDAR 坐标系
+             → 柱坐标体素化 → 作为稀疏点云送入 Cylinder3D
+
+  这是最核心的区别：RobotCar 的 Radar 走图像分支 (ResNet)，HeRCULES 的 Radar 走点云分支 (Cylinder3D)。
+
+  3.3 相机处理
+
+  RobotCar:  3 张图分别加载，各走一次 forward pass (3 个 camera loss)
+
+  HeRCULES:  只有 1 张 stereo_left，mono_right/mono_rear 用全零填充
+             只做 1 次 camera forward pass (1 个 camera loss)
+
+  3.4 位姿 (Pose) 来源
+
+  RobotCar:  GPS/INS 数据 (ins.csv)，需要时间戳插值
+
+  HeRCULES:  预计算的 ground truth 文件 (PR_GT/Aeva_gt.txt)
+             格式: [timestamp, x, y, z, qx, qy, qz, qw]
+
+  ---
+  四、传感器对齐方式
+
+  RobotCar:  每个传感器有独立的 .timestamps 文件
+             → 按时间戳逐帧匹配
+
+  HeRCULES:  用 KDTree 做两种对齐：
+             Camera → LiDAR：时间域对齐（最近时间戳）
+             Radar  → LiDAR：空间域对齐（XY 位置最近邻）
+             只保留三传感器都存在的帧
+
+  ---
+  五、体素化 (Voxelization) 差异
+
+  5.1 RobotCar
+
+  原始代码通过 builder/data_builder.py + dataloader/pc_dataset.py 构建，使用 SemanticKITTI 风格的柱坐标体素化。
+
+  5.2 HeRCULES
+
+  dataloader/hercules_dataset.py 中完全重写：
+
+  # 柱坐标转换
+  (x, y, z) → (rho, phi, z)    # rho=√(x²+y²), phi=atan2(y,x)
+
+  # 体素网格: [480, 360, 32]
+  #            rho  phi   z
+
+  # 每个点的 8 维特征:
+  [Δrho, Δphi, Δz,   # 相对于体素中心的偏移（柱坐标）
+   rho, phi, z,       # 柱坐标绝对值
+   x, y]              # 笛卡尔 x, y
+
+  # 体素范围：
+  固定模式: rho [0, 50m], phi [-π, π], z [-4m, 2m]
+  自适应模式: 根据数据百分位数动态确定（HeRCULES 默认用这个）
+
+  ---
+  六、数据元组格式对比
+
+  6.1 原始 7 元组 (__getitem__ 输出)
+
+  RobotCar 7-tuple:
+    [0] mono_left        (3, 512, 512)  ← 真实图像
+    [1] mono_right       (3, 512, 512)  ← 真实图像
+    [2] mono_rear        (3, 512, 512)  ← 真实图像
+    [3] radar_image      (1, 512, 512)  ← 真实 Radar 2D 图
+    [4] left_lidar_xyz   (N, 3)         ← 左 LiDAR 点云
+    [5] right_lidar_xyz  (N, 3)         ← 右 LiDAR 点云
+    [6] pose             (6,)
+
+  HeRCULES 7-tuple:
+    [0] mono_left        (3, 512, 512)  ← 真实图像
+    [1] mono_right       (3, 512, 512)  ← 全零填充 ★
+    [2] mono_rear        (3, 512, 512)  ← 全零填充 ★
+    [3] radar_image_2d   (1, 512, 512)  ← 全零填充 ★
+    [4] lidar_xyz        (N_l, 3)       ← 唯一的 LiDAR
+    [5] radar_xyz        (N_r, 3)       ← Radar 3D 点云 ★
+    [6] pose             (6,)
+
+  关键区别：HeRCULES 用 Radar 3D 点云 替代了右 LiDAR 的位置，且大量字段用零填充以保持接口兼容。
+
+  6.2 训练用 11 元组 (体素化后)
+
+  两者结构相同：
+    [0]  voxel_positions_L   ← LiDAR 体素中心
+    [1]  grid_indices_L      ← LiDAR 体素坐标
+    [2]  features_L          ← LiDAR 点特征
+    [3]  voxel_positions_R   ← RobotCar: 右LiDAR / HeRCULES: Radar ★
+    [4]  grid_indices_R      ← 同上
+    [5]  features_R          ← 同上
+    [6]  mono_left           ← 相机图像
+    [7]  mono_right          ← HeRCULES 全零
+    [8]  mono_rear           ← HeRCULES 全零
+    [9]  radar_image_2d      ← HeRCULES 全零
+    [10] pose                ← 6DoF 位姿
+
+  ---
+  七、训练脚本差异
+
+  ┌──────────────┬─────────────────────────────────────┬───────────────────────────────────────────────────────┐
+  │     方面     │            TrainModel.py            │               scripts/hercules_train.py               │
+  ├──────────────┼─────────────────────────────────────┼───────────────────────────────────────────────────────┤
+  │ 数据构建     │ data_builder.build() 硬编码路径     │ 直接实例化 HerculesFusion + hercules_cylinder_dataset │
+  ├──────────────┼─────────────────────────────────────┼───────────────────────────────────────────────────────┤
+  │ 循环方式     │ while 循环                          │ for epoch in range(epochs)                            │
+  ├──────────────┼─────────────────────────────────────┼───────────────────────────────────────────────────────┤
+  │ Forward 次数 │ 6 次                                │ 3 次                                                  │
+  ├──────────────┼─────────────────────────────────────┼───────────────────────────────────────────────────────┤
+  │ Loss 公式    │ loss1+loss2+loss3+loss4+loss5+loss6 │ loss_lidar + loss_radar + loss_camera                 │
+  ├──────────────┼─────────────────────────────────────┼───────────────────────────────────────────────────────┤
+  │ 梯度裁剪     │ 无                                  │ clip_grad_norm_(max_norm=1.0)                         │
+  ├──────────────┼─────────────────────────────────────┼───────────────────────────────────────────────────────┤
+  │ Checkpoint   │ 基础保存                            │ best model + 周期保存 + resume 支持                   │
+  ├──────────────┼─────────────────────────────────────┼───────────────────────────────────────────────────────┤
+  │ 进度条       │ 基础 tqdm                           │ tqdm + L/R/C 各分支 loss 显示                         │
+  ├──────────────┼─────────────────────────────────────┼───────────────────────────────────────────────────────┤
+  │ num_workers  │ 不明确                              │ 4 (配置文件指定)                                      │
+  └──────────────┴─────────────────────────────────────┴───────────────────────────────────────────────────────┘
+
+  ---
+  八、新增的测试脚本 (hercules_test.py)
+
+  这是原始代码完全没有的，HeRCULES 版新增了 8 项测试：
+
+  1. test_data_loading()          ← 验证 11 元组结构
+  2. test_model_creation()        ← 初始化 FusionModel
+  3. test_checkpoint_loading()    ← 加载 checkpoint
+  4. test_lidar_inference()       ← LiDAR 分支推理
+  5. test_camera_inference()      ← Camera 分支推理
+  6. test_radar_inference()       ← Radar 分支推理
+  7. test_multi_modal_fusion()    ← 三模态融合推理
+  8. test_gradient_flow()         ← 反向传播梯度检查
+
+  ---
+  九、核心设计思想差异
+
+  RobotCar 方案:
+    6 个传感器 → 6 次 forward pass → 6 个 loss → 求和
+    Radar 当作 2D 图像处理 (ResNet)
+    每个传感器独立，无跨模态标定
+
+  HeRCULES 方案:
+    3 个传感器 → 3 次 forward pass → 3 个 loss → 求和
+    Radar 当作 3D 点云处理 (Cylinder3D) ← 最大改进
+    Radar→LiDAR 坐标变换 (标定矩阵)
+    KDTree 时空对齐
+    缺失传感器用零填充保持接口兼容
+
+  最核心的改变：HeRCULES 把 Radar 从"2D 图像处理"升级为"3D 点云处理"，与 LiDAR 走相同的 Cylinder3D 体素化管线，这理论上能更好地利用 3D Radar 的空间信息。
