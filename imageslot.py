@@ -7,14 +7,13 @@ from torch.autograd import Variable
 
 
 def build_grid(resolution):
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
     ranges = [np.linspace(0., 1., num=res) for res in resolution]
     grid = np.meshgrid(*ranges, sparse=False, indexing="ij")
     grid = np.stack(grid, axis=-1)
     grid = np.reshape(grid, [resolution[0], resolution[1], -1])
     grid = np.expand_dims(grid, axis=0)
     grid = grid.astype(np.float32)
-    return torch.tensor(np.concatenate([grid, 1.0 - grid], axis=-1)).to(device)
+    return torch.tensor(np.concatenate([grid, 1.0 - grid], axis=-1))
 
 
 class SoftPositionEmbed(nn.Module):
@@ -28,7 +27,7 @@ class SoftPositionEmbed(nn.Module):
         """
         super(SoftPositionEmbed, self).__init__()
         self.proj = nn.Linear(4, hidden_size)
-        self.grid = build_grid(resolution)
+        self.register_buffer('grid', build_grid(resolution))
         print(self.grid.shape,"grid shape")
 
     def forward(self, inputs):
@@ -73,7 +72,6 @@ class SlotAttention(nn.Module):
         self.iters = iters
         self.num_slots = num_slots
         self.scale = encoder_dims ** -0.5
-        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
         self.norm_input = nn.LayerNorm(encoder_dims)
         self.norm_slots = nn.LayerNorm(encoder_dims)
@@ -116,7 +114,7 @@ class SlotAttention(nn.Module):
         # slots = torch.normal(mu, sigma)
 
         # learnable slots initialization
-        slots = self.slots_embedding(torch.arange(0, n_s).expand(b, n_s).to(self.device))
+        slots = self.slots_embedding(torch.arange(0, n_s).expand(b, n_s).to(inputs.device))
 
         # Multiple rounds of attention.
         for _ in range(self.iters):

@@ -346,9 +346,9 @@ class Imageloc(nn.Module):
 
     def __init__(self):
         super(Imageloc, self).__init__()
-        self.slotatten = SlotAttentionAutoEncoder(resolution=(64,64),iters=5).cuda()
+        self.slotatten = SlotAttentionAutoEncoder(resolution=(64,64),iters=5)
         self.resnet = resnet152(pretrained=True)
-        self.resnet = nn.Sequential(*list( self.resnet.children())[:-4]).cuda()
+        self.resnet = nn.Sequential(*list( self.resnet.children())[:-4])
 
     def forward(self,x):
         x = self.resnet(x)
@@ -365,10 +365,10 @@ class Radarloc(nn.Module):
 
     def __init__(self):
         super(Radarloc, self).__init__()
-        self.first_conv_layer = nn.Conv2d(1, 3, kernel_size=3, stride=1, padding=1, dilation=1, groups=1, bias=True).cuda()
-        self.slotatten = SlotAttentionAutoEncoder(resolution=(64,64),iters=5).cuda()
+        self.first_conv_layer = nn.Conv2d(1, 3, kernel_size=3, stride=1, padding=1, dilation=1, groups=1, bias=True)
+        self.slotatten = SlotAttentionAutoEncoder(resolution=(64,64),iters=5)
         self.resnet = resnet152(pretrained=True)
-        self.resnet = nn.Sequential(*list( self.resnet.children())[:-4]).cuda()
+        self.resnet = nn.Sequential(*list( self.resnet.children())[:-4])
 
     def forward(self,x):
         x = self.first_conv_layer(x)

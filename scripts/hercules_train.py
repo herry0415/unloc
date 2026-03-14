@@ -247,10 +247,10 @@ def train_one_epoch(model, train_loader, criterion, optimizer,
         # Camera data
         monoleft = torch.from_numpy(data[6]).float().to(device)
 
-        # Labels (6DoF: rot(3) + trans(3))
+        # Labels: process_poses outputs [trans_normalized(3), log_quat(3)]
         labels = torch.from_numpy(data[10]).float().to(device)
-        rotgt = labels[:, 0:3]
-        transgt = labels[:, 3:6]
+        transgt = labels[:, 0:3]  # normalized translation
+        rotgt = labels[:, 3:6]    # log quaternion
 
         optimizer.zero_grad()
 
@@ -329,8 +329,8 @@ def validate(model, val_loader, criterion, device):
             monoleft = torch.from_numpy(data[6]).float().to(device)
 
             labels = torch.from_numpy(data[10]).float().to(device)
-            rotgt = labels[:, 0:3]
-            transgt = labels[:, 3:6]
+            transgt = labels[:, 0:3]  # normalized translation
+            rotgt = labels[:, 3:6]    # log quaternion
 
             # Forward passes
             trans_l, rot_l = model([pt_fea_tenl, vox_tenl, actual_bs])

@@ -1,400 +1,429 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-HeRCULES Test/Inference Script
+HeRCULES Multi-Modal Fusion Evaluation Script
 
-Validates the model on HeRCULES test data with all 3 modalities.
+Evaluates trained FusionModel on HeRCULES test data with quantitative metrics:
+- Mean/Median Translation Error (ATE) in meters
+- Mean/Median Rotation Error (ARE) in degrees
+- Per-modality evaluation (LiDAR, Radar, Camera)
+- Trajectory visualization
+- Error distribution plots
 
-Tests:
-1. Data loading (HerculesFusion + hercules_cylinder_dataset)
-2. Model creation
-3. Checkpoint loading
-4. LiDAR inference
-5. Radar inference
-6. Camera inference
-7. Full multi-modal inference
-8. Gradient flow
+Reference: hercules/test.py evaluation flow
 
 Usage:
-    cd <project_root>
-    python scripts/hercules_test.py --sequence Library --checkpoint checkpoints/hercules_best.pt
+    CUDA_VISIBLE_DEVICES=1 python scripts/hercules_test.py \
+        --sequence Library \
+        --checkpoint checkpoints/hercules_best.pt \
+        --output_dir results/hercules_eval
 """
 
 import os
 import sys
 import argparse
 import time
+import numpy as np
 
 # ============================================================
-# Setup paths
+# Setup paths BEFORE any project imports
 # ============================================================
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
-# Parse our arguments first
-test_parser = argparse.ArgumentParser(description='HeRCULES inference test')
+# Parse arguments
+test_parser = argparse.ArgumentParser(description='HeRCULES Fusion Evaluation')
 test_parser.add_argument('--sequence', type=str, default='Library',
                          choices=['Library', 'Sports'],
-                         help='Sequence to test on')
+                         help='Sequence to evaluate')
 test_parser.add_argument('--data_root', type=str, default='/data/drj/HeRCULES/',
                          help='Path to HeRCULES dataset')
 test_parser.add_argument('--config', type=str,
                          default=os.path.join(PROJECT_ROOT, 'config', 'hercules_fusion.yaml'),
                          help='Path to config file')
-test_parser.add_argument('--checkpoint', type=str, default=None,
+test_parser.add_argument('--checkpoint', type=str, required=True,
                          help='Path to model checkpoint')
-test_parser.add_argument('--batch_size', type=int, default=4,
-                         help='Batch size for inference')
+test_parser.add_argument('--batch_size', type=int, default=1,
+                         help='Batch size for evaluation')
+test_parser.add_argument('--output_dir', type=str, default='results/hercules_eval',
+                         help='Directory to save evaluation results')
+test_parser.add_argument('--gpu', type=int, default=0,
+                         help='GPU ID to use')
+test_parser.add_argument('--split', type=str, default='val',
+                         choices=['val', 'train'],
+                         help='Data split to evaluate on')
 test_args = test_parser.parse_args()
 
-# Now override sys.argv for Combinedmodel.py
+# Override sys.argv for Combinedmodel.py
 sys.argv = [sys.argv[0], '-y', test_args.config]
 
 import warnings
 warnings.filterwarnings("ignore")
 
-import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
-# ============================================================
-# Helper Functions
-# ============================================================
-
-def check_tensor(name, tensor):
-    """Check tensor for NaN/Inf."""
-    has_nan = torch.isnan(tensor).any().item()
-    has_inf = torch.isinf(tensor).any().item()
-
-    status = "✓ OK"
-    if has_nan:
-        status = "✗ NaN DETECTED"
-    elif has_inf:
-        status = "✗ Inf DETECTED"
-
-    print(f"  {name:30s} shape={str(tuple(tensor.shape)):20s} "
-          f"range=[{tensor.min().item():8.4f}, {tensor.max().item():8.4f}] {status}")
-
-    return not has_nan and not has_inf
-
-
-def print_section(title):
-    """Print a section header."""
-    print("\n" + "=" * 70)
-    print(f"  {title}")
-    print("=" * 70)
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 
 
 # ============================================================
-# Test Functions
+# Pose utility functions (from tools/utils.py and hercules/test.py)
 # ============================================================
 
-def test_data_loading():
-    """Test 1: Data loading."""
-    print_section("Test 1: Data Loading")
+def qexp(q):
+    """Convert log quaternion (3,) to quaternion (4,)."""
+    n = np.linalg.norm(q)
+    q = np.hstack((np.cos(n), np.sinc(n / np.pi) * q))
+    return q
 
+
+def val_translation(pred, gt):
+    """Translation error: Euclidean distance in meters."""
+    return np.linalg.norm(pred - gt)
+
+
+def val_rotation(pred_q, gt_q):
+    """Rotation error: angular distance in degrees."""
+    d = abs(np.dot(pred_q, gt_q))
+    d = min(1.0, max(-1.0, d))
+    theta = 2 * np.arccos(d) * 180 / np.pi
+    return theta
+
+
+# ============================================================
+# Evaluation functions
+# ============================================================
+
+def load_pose_stats(data_root, sequence_name):
+    """Load pose normalization statistics (mean_t, std_t) from training."""
+    pose_stats_file = os.path.join(
+        data_root, sequence_name,
+        f'{sequence_name}_fusion_pose_stats.txt'
+    )
+    if not os.path.exists(pose_stats_file):
+        print(f"  WARNING: Pose stats file not found: {pose_stats_file}")
+        print(f"  Using zeros for mean and ones for std (no de-normalization)")
+        return np.zeros(3), np.ones(3)
+
+    stats = np.loadtxt(pose_stats_file)
+    mean_t = stats[0]
+    std_t = stats[1]
+    print(f"  Pose stats loaded: mean_t={mean_t}, std_t={std_t}")
+    return mean_t, std_t
+
+
+def build_test_loader():
+    """Build test data loader."""
     from data.hercules_fusion import HerculesFusion
     from dataloader.hercules_dataset import hercules_cylinder_dataset, collate_fn_BEV
 
-    # Load datasets
-    val_pc_dataset = HerculesFusion(
+    test_pc_dataset = HerculesFusion(
         data_root=test_args.data_root,
         sequence_name=test_args.sequence,
-        split='val'
+        split=test_args.split
     )
-
-    val_cyl_dataset = hercules_cylinder_dataset(
-        val_pc_dataset,
+    test_cyl_dataset = hercules_cylinder_dataset(
+        test_pc_dataset,
         grid_size=[480, 360, 32],
         fixed_volume_space=False
     )
-
-    val_loader = DataLoader(
-        val_cyl_dataset,
-        batch_size=min(test_args.batch_size, len(val_cyl_dataset)),
+    test_loader = DataLoader(
+        test_cyl_dataset,
+        batch_size=test_args.batch_size,
         collate_fn=collate_fn_BEV,
         shuffle=False,
-        num_workers=0
+        num_workers=4,
+        pin_memory=True
     )
-
-    print(f"  Validation dataset size: {len(val_cyl_dataset)}")
-    print(f"  Batch size: {test_args.batch_size}")
-
-    # Load a batch
-    for batch_idx, data in enumerate(val_loader):
-        actual_bs = data[10].shape[0]
-        print(f"\n  Sample batch ({actual_bs} items):")
-        print(f"    [0] voxel_pos_l:   {data[0].shape if isinstance(data[0], torch.Tensor) else 'list'}")
-        print(f"    [1] grid_ind_l:    list of {len(data[1])} arrays")
-        print(f"    [2] fea_l:         list of {len(data[2])} arrays, "
-              f"first shape={data[2][0].shape if len(data[2]) > 0 else 'empty'}")
-        print(f"    [3] voxel_pos_r:   {data[3].shape if isinstance(data[3], torch.Tensor) else 'list'}")
-        print(f"    [4] grid_ind_r:    list of {len(data[4])} arrays")
-        print(f"    [5] fea_r:         list of {len(data[5])} arrays, "
-              f"first shape={data[5][0].shape if len(data[5]) > 0 else 'empty'}")
-        print(f"    [6] mono_left:     {data[6].shape}")
-        print(f"    [7] mono_right:    {data[7].shape}")
-        print(f"    [8] mono_rear:     {data[8].shape}")
-        print(f"    [9] radar_2d:      {data[9].shape}")
-        print(f"    [10] pose:         {data[10].shape}")
-        print("  ✓ Data loading successful")
-        break
-
-    return val_loader
+    return test_loader, len(test_cyl_dataset)
 
 
-def test_model_creation(device):
-    """Test 2: Model creation."""
-    print_section("Test 2: Model Creation")
-
+def build_model(device):
+    """Build and load model."""
     from FusionModel import Fusionmodel
 
     model = Fusionmodel()
     model.to(device)
+
+    # Load checkpoint (handle DDP 'module.' prefix)
+    state_dict = torch.load(test_args.checkpoint, map_location=device)
+    if any(k.startswith('module.') for k in state_dict.keys()):
+        state_dict = {k[7:]: v for k, v in state_dict.items()}
+        print("  Detected DDP checkpoint, removed 'module.' prefix")
+    model.load_state_dict(state_dict)
     model.eval()
 
     total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-    print(f"  Total parameters:     {total_params:,}")
-    print(f"  Trainable parameters: {trainable_params:,}")
-
-    print(f"  Sub-models:")
-    print(f"    - LiDAR model:  {type(model.lidarmodel).__name__}")
-    print(f"    - Image model:  {type(model.imagemodel).__name__}")
-    print(f"    - Radar model:  {type(model.radarmodel).__name__}")
-    print(f"    - Regression:   {type(model.regression).__name__}")
-
-    print("  ✓ Model created successfully")
+    print(f"  Model loaded: {total_params:,} parameters")
+    print(f"  Checkpoint: {test_args.checkpoint}")
     return model
 
 
-def test_checkpoint_loading(model, device):
-    """Test 3: Checkpoint loading."""
-    print_section("Test 3: Checkpoint Loading")
+def evaluate_single_modality(model, test_loader, lenset, device, mean_t, std_t,
+                             modality='lidar'):
+    """
+    Evaluate a single modality on all test samples.
 
-    if test_args.checkpoint is None:
-        print("  (Skipping - no checkpoint specified, using random init)")
-        return model
+    Args:
+        modality: 'lidar', 'radar', or 'camera'
 
-    if not os.path.exists(test_args.checkpoint):
-        print(f"  WARNING: Checkpoint not found: {test_args.checkpoint}")
-        print("  Continuing with random initialization")
-        return model
+    Returns:
+        error_t, error_q, pred_translations, gt_translations, pred_rotations, gt_rotations, times
+    """
+    gt_translation = np.zeros((lenset, 3))
+    pred_translation = np.zeros((lenset, 3))
+    gt_rotation = np.zeros((lenset, 4))
+    pred_rotation = np.zeros((lenset, 4))
+    error_t = np.zeros(lenset)
+    error_q = np.zeros(lenset)
+    time_results = np.zeros(lenset)
 
-    try:
-        state_dict = torch.load(test_args.checkpoint, map_location=device)
-        model.load_state_dict(state_dict)
-        print(f"  ✓ Loaded: {test_args.checkpoint}")
-    except Exception as e:
-        print(f"  ERROR loading checkpoint: {e}")
-        return model
+    tqdm_loader = tqdm(test_loader, total=len(test_loader),
+                       desc=f'Eval [{modality}]', ncols=100, ascii=True)
 
-    return model
+    sample_idx = 0
+    with torch.no_grad():
+        for step, data in enumerate(tqdm_loader):
+            batch_size = data[10].shape[0]
+            start_idx = sample_idx
+            end_idx = min(sample_idx + batch_size, lenset)
+            actual_bs = end_idx - start_idx
 
+            # Ground truth pose: [rot(3), trans(3)] normalized
+            pose_raw = data[10][:actual_bs]
+            pose_gt = pose_raw if isinstance(pose_raw, np.ndarray) else pose_raw.numpy()  # (B, 6)
 
-def test_lidar_inference(model, batch, device, batch_size):
-    """Test 4: LiDAR inference."""
-    print_section("Test 4: LiDAR Branch Inference")
+            # De-normalize GT translation
+            gt_trans_raw = pose_gt[:, :3] * std_t + mean_t  # (B, 3)
+            gt_translation[start_idx:end_idx] = gt_trans_raw
 
-    all_ok = True
+            # GT rotation: log_quat → quaternion
+            for i in range(actual_bs):
+                gt_rotation[start_idx + i] = qexp(pose_gt[i, 3:6])
 
-    # Left LiDAR
-    print("  [Left LiDAR]")
-    vox_tenl = [torch.from_numpy(i).to(device) for i in batch[1]]
-    pt_fea_tenl = [torch.from_numpy(i).type(torch.FloatTensor).to(device) for i in batch[2]]
+            # Forward pass
+            start_time = time.time()
 
-    try:
-        with torch.no_grad():
-            t0 = time.time()
-            trans_l, rot_l = model([pt_fea_tenl, vox_tenl, batch_size])
-            t1 = time.time()
+            if modality == 'lidar':
+                vox = [torch.from_numpy(i).to(device) for i in data[1]]
+                fea = [torch.from_numpy(i).type(torch.FloatTensor).to(device)
+                       for i in data[2]]
+                trans_pred, rot_pred = model([fea, vox, actual_bs])
 
-        all_ok &= check_tensor("Translation", trans_l)
-        all_ok &= check_tensor("Rotation", rot_l)
-        print(f"    Inference time: {(t1-t0)*1000:.1f}ms")
-    except Exception as e:
-        print(f"    ✗ Error: {e}")
-        all_ok = False
+            elif modality == 'radar':
+                vox = [torch.from_numpy(i).to(device) for i in data[4]]
+                fea = [torch.from_numpy(i).type(torch.FloatTensor).to(device)
+                       for i in data[5]]
+                trans_pred, rot_pred = model([fea, vox, actual_bs])
 
-    # Right LiDAR (Radar)
-    print("\n  [Right LiDAR/Radar]")
-    vox_tenr = [torch.from_numpy(i).to(device) for i in batch[4]]
-    pt_fea_tenr = [torch.from_numpy(i).type(torch.FloatTensor).to(device) for i in batch[5]]
+            elif modality == 'camera':
+                monoleft = torch.from_numpy(data[6][:actual_bs]).float().to(device)
+                trans_pred, rot_pred = model([monoleft])
 
-    try:
-        with torch.no_grad():
-            t0 = time.time()
-            trans_r, rot_r = model([pt_fea_tenr, vox_tenr, batch_size])
-            t1 = time.time()
+            end_time = time.time()
+            cost_time = (end_time - start_time) / actual_bs
 
-        all_ok &= check_tensor("Translation", trans_r)
-        all_ok &= check_tensor("Rotation", rot_r)
-        print(f"    Inference time: {(t1-t0)*1000:.1f}ms")
-    except Exception as e:
-        print(f"    ✗ Error: {e}")
-        all_ok = False
+            # Predictions to numpy
+            # model output: (xyz=translation, wpqr=rotation)
+            trans_np = trans_pred.cpu().numpy()  # (B, 3) translation prediction
+            rot_np = rot_pred.cpu().numpy()      # (B, 3) rotation prediction
 
-    status = "✓ PASSED" if all_ok else "✗ FAILED"
-    print(f"\n  [{status}] LiDAR inference")
-    return all_ok
+            # De-normalize predicted translation
+            pred_trans_raw = trans_np * std_t + mean_t
+            pred_translation[start_idx:end_idx] = pred_trans_raw[:actual_bs]
 
+            # Predicted rotation: log_quat → quaternion
+            for i in range(actual_bs):
+                pred_rotation[start_idx + i] = qexp(rot_np[i])
 
-def test_camera_inference(model, batch, device):
-    """Test 5: Camera inference."""
-    print_section("Test 5: Camera Branch Inference")
+            # Compute errors
+            for i in range(actual_bs):
+                idx = start_idx + i
+                error_t[idx] = val_translation(
+                    pred_translation[idx], gt_translation[idx])
+                error_q[idx] = val_rotation(
+                    pred_rotation[idx], gt_rotation[idx])
 
-    all_ok = True
-    camera_names = ['mono_left', 'mono_right', 'mono_rear']
-    camera_indices = [6, 7, 8]
+            time_results[start_idx:end_idx] = cost_time
+            sample_idx = end_idx
 
-    for name, idx in zip(camera_names, camera_indices):
-        print(f"  [{name}]")
-        img = torch.from_numpy(batch[idx]).float().to(device)
+            # Update tqdm
+            if sample_idx > 0:
+                tqdm_loader.set_postfix({
+                    'ATE': f'{np.mean(error_t[:sample_idx]):.3f}m',
+                    'ARE': f'{np.mean(error_q[:sample_idx]):.3f}°'
+                })
 
-        try:
-            with torch.no_grad():
-                t0 = time.time()
-                trans, rot = model([img])
-                t1 = time.time()
-
-            all_ok &= check_tensor(f"Translation ({name})", trans)
-            all_ok &= check_tensor(f"Rotation ({name})", rot)
-            print(f"    Inference time: {(t1-t0)*1000:.1f}ms\n")
-        except Exception as e:
-            print(f"    ✗ Error: {e}\n")
-            all_ok = False
-
-    status = "✓ PASSED" if all_ok else "✗ FAILED"
-    print(f"  [{status}] Camera inference")
-    return all_ok
-
-
-def test_radar_inference(model, batch, device, batch_size):
-    """Test 6: Radar inference."""
-    print_section("Test 6: Radar 3D Point Cloud Inference")
-
-    print("  [Radar as point cloud]")
-    vox_tenr = [torch.from_numpy(i).to(device) for i in batch[4]]
-    pt_fea_tenr = [torch.from_numpy(i).type(torch.FloatTensor).to(device) for i in batch[5]]
-
-    all_ok = True
-    try:
-        with torch.no_grad():
-            t0 = time.time()
-            trans, rot = model([pt_fea_tenr, vox_tenr, batch_size])
-            t1 = time.time()
-
-        all_ok &= check_tensor("Translation (Radar)", trans)
-        all_ok &= check_tensor("Rotation (Radar)", rot)
-        print(f"    Inference time: {(t1-t0)*1000:.1f}ms")
-    except Exception as e:
-        print(f"    ✗ Error: {e}")
-        all_ok = False
-
-    status = "✓ PASSED" if all_ok else "✗ FAILED"
-    print(f"  [{status}] Radar inference")
-    return all_ok
+    return (error_t[:sample_idx], error_q[:sample_idx],
+            pred_translation[:sample_idx], gt_translation[:sample_idx],
+            pred_rotation[:sample_idx], gt_rotation[:sample_idx],
+            time_results[:sample_idx])
 
 
-def test_multi_modal_fusion(model, batch, device, batch_size):
-    """Test 7: Full multi-modal pipeline."""
-    print_section("Test 7: Full Multi-Modal Pipeline")
+def print_metrics(modality, error_t, error_q, time_results):
+    """Print evaluation metrics for a modality."""
+    print(f"\n  --- {modality.upper()} Metrics ---")
+    print(f"  Mean  Translation Error (ATE):  {np.mean(error_t):.4f} m")
+    print(f"  Mean  XY Translation Error:     {np.mean(np.sqrt(error_t**2)):.4f} m")
+    print(f"  Mean  Rotation Error (ARE):     {np.mean(error_q):.4f} deg")
+    print(f"  Median Translation Error:       {np.median(error_t):.4f} m")
+    print(f"  Median Rotation Error:          {np.median(error_q):.4f} deg")
+    print(f"  Mean Inference Time:            {np.mean(time_results)*1000:.1f} ms/sample")
 
-    all_ok = True
 
-    vox_tenl = [torch.from_numpy(i).to(device) for i in batch[1]]
-    pt_fea_tenl = [torch.from_numpy(i).type(torch.FloatTensor).to(device) for i in batch[2]]
+def save_trajectory_plot(pred_t, gt_t, modality, save_dir):
+    """Save trajectory comparison plot."""
+    fig = plt.figure(figsize=(10, 8))
+    plt.scatter(gt_t[:, 1], gt_t[:, 0], s=1, c='black', label='Ground Truth')
+    plt.scatter(pred_t[:, 1], pred_t[:, 0], s=1, c='red', label='Predicted')
+    plt.plot(gt_t[0, 1], gt_t[0, 0], 'y*', markersize=15, label='Start')
+    plt.xlabel('Y [m]')
+    plt.ylabel('X [m]')
+    plt.title(f'Trajectory Comparison - {modality.upper()}')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.axis('equal')
 
-    vox_tenr = [torch.from_numpy(i).to(device) for i in batch[4]]
-    pt_fea_tenr = [torch.from_numpy(i).type(torch.FloatTensor).to(device) for i in batch[5]]
+    filepath = os.path.join(save_dir, f'trajectory_{modality}.png')
+    fig.savefig(filepath, dpi=200, bbox_inches='tight')
+    plt.close(fig)
+    print(f"  Saved: {filepath}")
 
-    monoleft = torch.from_numpy(batch[6]).float().to(device)
 
-    pose = torch.from_numpy(batch[10]).float().to(device)
+def save_error_distribution(error_t, error_q, modality, save_dir):
+    """Save error distribution plots."""
+    # Translation error distribution
+    fig = plt.figure(figsize=(10, 4))
+    t_num = np.arange(len(error_t))
+    plt.scatter(t_num, error_t, s=1, c='red')
+    plt.xlabel('Sample Index')
+    plt.ylabel('Translation Error (m)')
+    plt.title(f'Translation Error Distribution - {modality.upper()}')
+    plt.grid(True, alpha=0.3)
+    filepath = os.path.join(save_dir, f'error_translation_{modality}.png')
+    fig.savefig(filepath, dpi=200, bbox_inches='tight')
+    plt.close(fig)
 
-    try:
-        with torch.no_grad():
-            t0 = time.time()
+    # Rotation error distribution
+    fig = plt.figure(figsize=(10, 4))
+    q_num = np.arange(len(error_q))
+    plt.scatter(q_num, error_q, s=1, c='blue')
+    plt.xlabel('Sample Index')
+    plt.ylabel('Rotation Error (deg)')
+    plt.title(f'Rotation Error Distribution - {modality.upper()}')
+    plt.grid(True, alpha=0.3)
+    filepath = os.path.join(save_dir, f'error_rotation_{modality}.png')
+    fig.savefig(filepath, dpi=200, bbox_inches='tight')
+    plt.close(fig)
 
-            # 3 forward passes
-            trans_l, rot_l = model([pt_fea_tenl, vox_tenl, batch_size])
-            trans_r, rot_r = model([pt_fea_tenr, vox_tenr, batch_size])
+    print(f"  Saved: error_translation_{modality}.png, error_rotation_{modality}.png")
+
+
+def save_numeric_results(error_t, error_q, pred_t, gt_t, pred_q, modality,
+                         save_dir):
+    """Save numeric results to text files."""
+    np.savetxt(os.path.join(save_dir, f'error_t_{modality}.txt'),
+               error_t, fmt='%8.7f')
+    np.savetxt(os.path.join(save_dir, f'error_q_{modality}.txt'),
+               error_q, fmt='%8.7f')
+    np.savetxt(os.path.join(save_dir, f'pred_t_{modality}.txt'),
+               pred_t, fmt='%8.7f')
+    np.savetxt(os.path.join(save_dir, f'gt_t_{modality}.txt'),
+               gt_t, fmt='%8.7f')
+    np.savetxt(os.path.join(save_dir, f'pred_q_{modality}.txt'),
+               pred_q, fmt='%8.7f')
+    print(f"  Saved: error/pred/gt text files for {modality}")
+
+
+def evaluate_fusion(model, test_loader, lenset, device, mean_t, std_t):
+    """
+    Evaluate multi-modal fusion: run all 3 modalities per sample,
+    average predictions as the fused result.
+    """
+    gt_translation = np.zeros((lenset, 3))
+    pred_translation = np.zeros((lenset, 3))
+    gt_rotation = np.zeros((lenset, 4))
+    pred_rotation = np.zeros((lenset, 4))
+    error_t = np.zeros(lenset)
+    error_q = np.zeros(lenset)
+    time_results = np.zeros(lenset)
+
+    tqdm_loader = tqdm(test_loader, total=len(test_loader),
+                       desc='Eval [FUSION]', ncols=100, ascii=True)
+
+    sample_idx = 0
+    with torch.no_grad():
+        for step, data in enumerate(tqdm_loader):
+            batch_size = data[10].shape[0]
+            start_idx = sample_idx
+            end_idx = min(sample_idx + batch_size, lenset)
+            actual_bs = end_idx - start_idx
+
+            # Ground truth
+            pose_raw = data[10][:actual_bs]
+            pose_gt = pose_raw if isinstance(pose_raw, np.ndarray) else pose_raw.numpy()
+
+            gt_trans_raw = pose_gt[:, :3] * std_t + mean_t
+            gt_translation[start_idx:end_idx] = gt_trans_raw
+            for i in range(actual_bs):
+                gt_rotation[start_idx + i] = qexp(pose_gt[i, 3:6])
+
+            # ========== 3 forward passes ==========
+            start_time = time.time()
+
+            # LiDAR
+            vox_l = [torch.from_numpy(i).to(device) for i in data[1]]
+            fea_l = [torch.from_numpy(i).type(torch.FloatTensor).to(device) for i in data[2]]
+            trans_l, rot_l = model([fea_l, vox_l, actual_bs])
+
+            # Radar
+            vox_r = [torch.from_numpy(i).to(device) for i in data[4]]
+            fea_r = [torch.from_numpy(i).type(torch.FloatTensor).to(device) for i in data[5]]
+            trans_r, rot_r = model([fea_r, vox_r, actual_bs])
+
+            # Camera
+            monoleft = torch.from_numpy(data[6][:actual_bs]).float().to(device)
             trans_c, rot_c = model([monoleft])
 
-            t1 = time.time()
+            end_time = time.time()
+            cost_time = (end_time - start_time) / actual_bs
 
-        print(f"  LiDAR output:   trans shape={trans_l.shape}, rot shape={rot_l.shape}")
-        print(f"  Radar output:   trans shape={trans_r.shape}, rot shape={rot_r.shape}")
-        print(f"  Camera output:  trans shape={trans_c.shape}, rot shape={rot_c.shape}")
-        print(f"  Ground truth:   pose shape={pose.shape}")
-        print(f"  Total inference time (3 passes): {(t1-t0)*1000:.1f}ms")
+            # ========== Average fusion ==========
+            # model output: (trans=translation, rot=rotation)
+            avg_trans = ((trans_l + trans_r + trans_c) / 3.0).cpu().numpy()  # avg translation
+            avg_rot = ((rot_l + rot_r + rot_c) / 3.0).cpu().numpy()        # avg rotation
 
-        all_ok &= check_tensor("LiDAR Trans", trans_l)
-        all_ok &= check_tensor("LiDAR Rot", rot_l)
-        all_ok &= check_tensor("Radar Trans", trans_r)
-        all_ok &= check_tensor("Radar Rot", rot_r)
-        all_ok &= check_tensor("Camera Trans", trans_c)
-        all_ok &= check_tensor("Camera Rot", rot_c)
+            # De-normalize translation
+            pred_trans_raw = avg_trans * std_t + mean_t
+            pred_translation[start_idx:end_idx] = pred_trans_raw[:actual_bs]
 
-    except Exception as e:
-        print(f"  ✗ Error in multi-modal pipeline: {e}")
-        all_ok = False
+            # Rotation: log_quat → quaternion
+            for i in range(actual_bs):
+                pred_rotation[start_idx + i] = qexp(avg_rot[i])
 
-    status = "✓ PASSED" if all_ok else "✗ FAILED"
-    print(f"  [{status}] Multi-modal fusion")
-    return all_ok
+            # Compute errors
+            for i in range(actual_bs):
+                idx = start_idx + i
+                error_t[idx] = val_translation(pred_translation[idx], gt_translation[idx])
+                error_q[idx] = val_rotation(pred_rotation[idx], gt_rotation[idx])
 
+            time_results[start_idx:end_idx] = cost_time
+            sample_idx = end_idx
 
-def test_gradient_flow(model, batch, device, batch_size):
-    """Test 8: Gradient flow."""
-    print_section("Test 8: Gradient Flow & Backpropagation")
+            if sample_idx > 0:
+                tqdm_loader.set_postfix({
+                    'ATE': f'{np.mean(error_t[:sample_idx]):.3f}m',
+                    'ARE': f'{np.mean(error_q[:sample_idx]):.3f}°'
+                })
 
-    all_ok = True
-
-    vox_tenl = [torch.from_numpy(i).to(device) for i in batch[1]]
-    pt_fea_tenl = [torch.from_numpy(i).type(torch.FloatTensor).to(device) for i in batch[2]]
-
-    pose = torch.from_numpy(batch[10]).float().to(device)
-
-    try:
-        # Forward pass
-        trans, rot = model([pt_fea_tenl, vox_tenl, batch_size])
-
-        # Simple loss
-        loss = trans.mean() + rot.mean()
-
-        # Backward
-        loss.backward()
-
-        # Check gradients
-        model_has_grad = False
-        for name, param in model.named_parameters():
-            if param.grad is not None:
-                has_nan_grad = torch.isnan(param.grad).any().item()
-                has_inf_grad = torch.isinf(param.grad).any().item()
-
-                if has_nan_grad or has_inf_grad:
-                    print(f"  ✗ Gradient issue in {name}: NaN={has_nan_grad}, Inf={has_inf_grad}")
-                    all_ok = False
-                else:
-                    model_has_grad = True
-
-        if model_has_grad:
-            print("  ✓ Gradients computed successfully")
-            print(f"  ✓ Loss value: {loss.item():.6f}")
-        else:
-            print("  ✗ No gradients computed")
-            all_ok = False
-
-    except Exception as e:
-        print(f"  ✗ Error in gradient flow: {e}")
-        all_ok = False
-
-    status = "✓ PASSED" if all_ok else "✗ FAILED"
-    print(f"  [{status}] Gradient flow")
-    return all_ok
+    return (error_t[:sample_idx], error_q[:sample_idx],
+            pred_translation[:sample_idx], gt_translation[:sample_idx],
+            pred_rotation[:sample_idx], gt_rotation[:sample_idx],
+            time_results[:sample_idx])
 
 
 # ============================================================
@@ -402,69 +431,142 @@ def test_gradient_flow(model, batch, device, batch_size):
 # ============================================================
 
 def main():
-    print("=" * 70)
-    print("  HERCULES INFERENCE TEST")
-    print("=" * 70)
-    print(f"  Config: {test_args.config}")
-    print(f"  Sequence: {test_args.sequence}")
-    print(f"  Checkpoint: {test_args.checkpoint if test_args.checkpoint else '(random init)'}")
-    print(f"  Batch size: {test_args.batch_size}")
+    print("=" * 80)
+    print("  HERCULES MULTI-MODAL FUSION EVALUATION")
+    print("=" * 80)
+    print(f"  Sequence:    {test_args.sequence}")
+    print(f"  Split:       {test_args.split}")
+    print(f"  Checkpoint:  {test_args.checkpoint}")
+    print(f"  Batch size:  {test_args.batch_size}")
+    print(f"  Output dir:  {test_args.output_dir}")
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"  Device: {device}")
+    # Device
+    device = torch.device(f'cuda:{test_args.gpu}' if torch.cuda.is_available()
+                          else 'cpu')
+    print(f"  Device:      {device}")
+    if torch.cuda.is_available():
+        print(f"  GPU:         {torch.cuda.get_device_name(device)}")
+    print("=" * 80)
 
-    # Run tests
-    results = {}
+    # Create output directory
+    os.makedirs(test_args.output_dir, exist_ok=True)
 
-    try:
-        val_loader = test_data_loading()
-        results['data_loading'] = True
-    except Exception as e:
-        print(f"  ✗ Data loading failed: {e}")
-        results['data_loading'] = False
-        return
+    # Load pose stats for de-normalization
+    print("\n--- Loading Pose Statistics ---")
+    mean_t, std_t = load_pose_stats(test_args.data_root, test_args.sequence)
 
-    try:
-        model = test_model_creation(device)
-        results['model_creation'] = True
-    except Exception as e:
-        print(f"  ✗ Model creation failed: {e}")
-        results['model_creation'] = False
-        return
+    # Build data loader
+    print("\n--- Building Test Data Loader ---")
+    test_loader, lenset = build_test_loader()
+    print(f"  Test samples: {lenset}")
 
-    try:
-        model = test_checkpoint_loading(model, device)
-        results['checkpoint_loading'] = True
-    except Exception as e:
-        print(f"  ✗ Checkpoint loading failed: {e}")
-        results['checkpoint_loading'] = False
+    # Build and load model
+    print("\n--- Loading Model ---")
+    model = build_model(device)
 
-    model.eval()
+    # Open log file
+    log_path = os.path.join(test_args.output_dir, 'evaluation_log.txt')
+    LOG = open(log_path, 'w')
 
-    # Get a batch for inference tests
-    for batch in val_loader:
-        batch_size = batch[10].shape[0]
-        break
+    def log_string(s):
+        LOG.write(s + '\n')
+        LOG.flush()
+        print(s)
 
-    results['lidar_inference'] = test_lidar_inference(model, batch, device, batch_size)
-    results['camera_inference'] = test_camera_inference(model, batch, device)
-    results['radar_inference'] = test_radar_inference(model, batch, device, batch_size)
-    results['multi_modal'] = test_multi_modal_fusion(model, batch, device, batch_size)
-    results['gradient_flow'] = test_gradient_flow(model, batch, device, batch_size)
+    log_string(f"\nEvaluation: {test_args.sequence} | Split: {test_args.split}")
+    log_string(f"Checkpoint: {test_args.checkpoint}")
+    log_string(f"Test samples: {lenset}\n")
 
+    # ============================================================
+    # Evaluate each modality
+    # ============================================================
+    all_results = {}
+
+    for modality in ['lidar', 'radar', 'camera']:
+        log_string("\n" + "=" * 80)
+        log_string(f"  Evaluating: {modality.upper()}")
+        log_string("=" * 80)
+
+        error_t, error_q, pred_t, gt_t, pred_q, gt_q, times = \
+            evaluate_single_modality(
+                model, test_loader, lenset, device, mean_t, std_t,
+                modality=modality
+            )
+
+        # Print metrics
+        log_string(f"\n  --- {modality.upper()} Results ---")
+        log_string(f"  Mean  Position Error (m):     {np.mean(error_t):.4f}")
+        log_string(f"  Median Position Error (m):    {np.median(error_t):.4f}")
+        log_string(f"  Mean  Orientation Error (deg): {np.mean(error_q):.4f}")
+        log_string(f"  Median Orientation Error (deg):{np.median(error_q):.4f}")
+        log_string(f"  Mean  Inference Time (ms):    {np.mean(times)*1000:.1f}")
+
+        # Save plots
+        save_trajectory_plot(pred_t, gt_t, modality, test_args.output_dir)
+        save_error_distribution(error_t, error_q, modality, test_args.output_dir)
+        save_numeric_results(error_t, error_q, pred_t, gt_t, pred_q, modality,
+                             test_args.output_dir)
+
+        all_results[modality] = {
+            'mean_ate': np.mean(error_t),
+            'median_ate': np.median(error_t),
+            'mean_are': np.mean(error_q),
+            'median_are': np.median(error_q),
+            'mean_time_ms': np.mean(times) * 1000
+        }
+
+    # ============================================================
+    # Evaluate multi-modal fusion (average of 3 modalities)
+    # ============================================================
+    log_string("\n" + "=" * 80)
+    log_string("  Evaluating: MULTI-MODAL FUSION (LiDAR + Radar + Camera)")
+    log_string("=" * 80)
+
+    error_t, error_q, pred_t, gt_t, pred_q, gt_q, times = \
+        evaluate_fusion(model, test_loader, lenset, device, mean_t, std_t)
+
+    log_string(f"\n  --- FUSION Results ---")
+    log_string(f"  Mean  Position Error (m):     {np.mean(error_t):.4f}")
+    log_string(f"  Median Position Error (m):    {np.median(error_t):.4f}")
+    log_string(f"  Mean  Orientation Error (deg): {np.mean(error_q):.4f}")
+    log_string(f"  Median Orientation Error (deg):{np.median(error_q):.4f}")
+    log_string(f"  Mean  Inference Time (ms):    {np.mean(times)*1000:.1f}")
+
+    save_trajectory_plot(pred_t, gt_t, 'fusion', test_args.output_dir)
+    save_error_distribution(error_t, error_q, 'fusion', test_args.output_dir)
+    save_numeric_results(error_t, error_q, pred_t, gt_t, pred_q, 'fusion',
+                         test_args.output_dir)
+
+    all_results['fusion'] = {
+        'mean_ate': np.mean(error_t),
+        'median_ate': np.median(error_t),
+        'mean_are': np.mean(error_q),
+        'median_are': np.median(error_q),
+        'mean_time_ms': np.mean(times) * 1000
+    }
+
+    # ============================================================
     # Summary
-    print_section("TEST SUMMARY")
-    for test_name, passed in results.items():
-        status = "✓ PASSED" if passed else "✗ FAILED"
-        print(f"  {test_name:25s}: {status}")
+    # ============================================================
+    log_string("\n" + "=" * 80)
+    log_string("  EVALUATION SUMMARY")
+    log_string("=" * 80)
+    log_string(f"\n  {'Modality':<10} {'Mean ATE(m)':<15} {'Med ATE(m)':<15} "
+               f"{'Mean ARE(°)':<15} {'Med ARE(°)':<15} {'Time(ms)':<10}")
+    log_string("  " + "-" * 78)
 
-    all_passed = all(results.values())
-    if all_passed:
-        print("\n  ✓✓✓ ALL TESTS PASSED ✓✓✓")
-    else:
-        print("\n  ✗✗✗ SOME TESTS FAILED ✗✗✗")
+    for mod, r in all_results.items():
+        log_string(f"  {mod:<10} {r['mean_ate']:<15.4f} {r['median_ate']:<15.4f} "
+                   f"{r['mean_are']:<15.4f} {r['median_are']:<15.4f} "
+                   f"{r['mean_time_ms']:<10.1f}")
 
-    print("=" * 70)
+    log_string("  " + "-" * 78)
+    log_string(f"\n  Results saved to: {test_args.output_dir}/")
+    log_string("=" * 80)
+
+    LOG.close()
+    print(f"\n  Log saved to: {log_path}")
+    matplotlib.pyplot.close('all')
 
 
 if __name__ == '__main__':

@@ -143,10 +143,10 @@ class Fusionmodel(nn.Module):
         self.lidarmodel = Lidarmodel()
         self.imagemodel = Imageloc()
         self.radarmodel = Radarloc()
-        self.regression = Regressionlayer().cuda()
-        self.lidarmodaity = nn.Parameter(truncated_normal_(torch.randn(1, 1024)),requires_grad=True).cuda()
-        self.radarmodaity = nn.Parameter(truncated_normal_(torch.randn(1, 1024)),requires_grad=True).cuda()
-        self.cammodaity = nn.Parameter(truncated_normal_(torch.randn(1, 1024)),requires_grad=True).cuda()
+        self.regression = Regressionlayer()
+        self.lidarmodaity = nn.Parameter(truncated_normal_(torch.randn(1, 1024)), requires_grad=True)
+        self.radarmodaity = nn.Parameter(truncated_normal_(torch.randn(1, 1024)), requires_grad=True)
+        self.cammodaity = nn.Parameter(truncated_normal_(torch.randn(1, 1024)), requires_grad=True)
 
 
 
